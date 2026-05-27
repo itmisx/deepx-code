@@ -9,7 +9,7 @@ import (
 //go:embed skills/*
 var builtinFS embed.FS
 
-const builtinVersion = "2"
+const builtinVersion = "3"
 
 // ExtractBuiltins 将内嵌 skill 解压到 ~/.deepx/skills/。
 // 通过版本文件判断是否需要更新，避免每次启动都写盘。
