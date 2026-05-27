@@ -6,6 +6,7 @@ import "strings"
 //
 // 决策顺序:
 //  1. 用户消息小写化后,任意命中 complexKeywords 中的关键词 → "pro"
+//     (但求知类问题如"什么是重构"会被 learningPatterns 拦截,降级到长度兜底)
 //  2. 否则,按消息长度(rune 数)兜底:
 //     - < 100 → "flash"  (短消息默认走快模型)
 //     - > 500 → "pro"    (长消息一般有深度)
@@ -15,9 +16,11 @@ import "strings"
 func RouteByKeyword(userMsg string) string {
 	lower := strings.ToLower(userMsg)
 	for _, kw := range complexKeywords {
-		// 关键词本身已经是小写或 CJK(CJK 无大小写概念),
-		// 用 Contains 即可正确匹配;不做边界检测以保持简单。
 		if strings.Contains(lower, kw) {
+			// 命中关键词后再检查是否是求知类问题,避免"什么是重构"误升 pro
+			if isLearningQuery(lower) {
+				break // 穿透到长度兜底
+			}
 			return "pro"
 		}
 	}
@@ -30,6 +33,94 @@ func RouteByKeyword(userMsg string) string {
 		return "pro"
 	}
 	return "flash"
+}
+
+// isLearningQuery 检测消息是否是"求知类"问题(询问概念/知识而非执行任务)。
+// 这类消息即使命中复杂关键词也不需要 pro 模型。
+// 检测方式:
+//   - 中/英文:检查消息前缀(用户通常以疑问词开头)
+//   - 日/韩文:日韩的疑问助词在词尾(XXとは / XX이란),用 Contains 查任意位置
+func isLearningQuery(lower string) bool {
+	for _, p := range learningPatterns {
+		// 日/韩文模式:任意位置匹配(助词在词尾)
+		if isJAKOPattern(p) {
+			if strings.Contains(lower, p) {
+				return true
+			}
+			continue
+		}
+		// 中/英文模式:前缀匹配(疑问词在句首)
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isJAKOPattern 判断是否为日/韩文学习模式(这些语言疑问助词在词尾,需 Contains 匹配)。
+func isJAKOPattern(p string) bool {
+	switch p {
+	case "とは", "って何", "どうやって", "説明して",
+		"란 ", "이란 ", "뭐야 ", "설명해":
+		return true
+	}
+	return false
+}
+
+// learningPatterns 是求知类问题的前缀模式。
+// 匹配前缀而非 Contains,因为用户通常以疑问词开头询问知识性问题。
+// 顺序:短词在后避免被长词误挡(如"怎么"不在列表里,只有"怎么用""怎么理解")。
+var learningPatterns = []string{
+	// === 简体中文 ===
+	"什么是",
+	"什么是",
+	"怎么用",
+	"怎么理解",
+	"怎么配置",
+	"如何理解",
+	"如何配置",
+	"解释一下",
+	"介绍一下",
+	"帮我看看什么是",
+	"帮我解释一下",
+	"讲讲",
+	"说说",
+
+	// === 繁体中文 ===
+	"什麼是",
+	"什麼是",
+	"怎麼用",
+	"怎麼理解",
+	"如何理解",
+	"解釋一下",
+	"介紹一下",
+	"幫我看看什麼是",
+	"幫我解釋一下",
+	"講講",
+	"說說",
+
+	// === English ===
+	"what is ",
+	"what's ",
+	"how to ",
+	"how do i ",
+	"how does ",
+	"explain ",
+	"tell me about ",
+	"define ",
+	"what does ",
+
+	// === 日本語 ===
+	"とは",
+	"って何",
+	"どうやって",
+	"説明して",
+
+	// === 한국어 ===
+	"란 ",
+	"이란 ",
+	"뭐야 ",
+	"설명해",
 }
 
 // complexKeywords 触发 pro 路由的关键词列表。

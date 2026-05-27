@@ -58,6 +58,12 @@ type model struct {
 	activeModelRole string
 	activeModelID   string
 
+	// proKeepRounds 是 pro 模型保持轮数计数器。
+	// 每次收到 pro 的 ModelSwitchMsg 时设为 3,每轮用户消息递减 1。
+	// 当值 > 0 时,下一轮强制走 pro(跳过 RouteByKeyword 关键词路由)。
+	// 用户可输入 /flash 手动清 0 降回 flash。
+	proKeepRounds int
+
 	mode    agent.AgentMode
 	history []agent.ChatMessage
 
@@ -536,6 +542,13 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 	// 上一轮的 plan 清空
 	m.plan = nil
 
+	// B: pro 状态保持 — 如果上轮升了 pro,接下来 N 轮默认保持 pro
+	forceRole := ""
+	if m.proKeepRounds > 0 {
+		m.proKeepRounds--
+		forceRole = "pro"
+	}
+
 	workspace, _ := os.Getwd()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelAgent = cancel
@@ -547,6 +560,7 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 		workspace,
 		m.skillCatalog,
 		m.summary,
+		forceRole,
 	)
 	m.streamCh = ch
 	cmds = append(cmds, cmd)
@@ -1254,6 +1268,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 升级类的切换在聊天流里留一行可见痕迹,便于用户察觉为什么变贵了
 			m.chatContent.Append(fmt.Sprintf("\n[已升级到 %s 模型] 原因: %s\n", msg.Role, msg.Reason))
 			m.refreshViewport()
+			// B: pro 保持 — 升 pro 后接下来 3 轮默认保持,避免每轮重新关键词路由掉回 flash
+			if msg.Role == "pro" {
+				m.proKeepRounds = 3
+			}
 		}
 		return m, agent.ListenToStream(m.streamCh)
 
@@ -1619,6 +1637,14 @@ func (m *model) handleSlashCommand(input string) tea.Cmd {
 		}
 	case "/compact":
 		return m.startManualCompaction()
+	case "/flash":
+		m.proKeepRounds = 0
+		msg := fmt.Sprintf("已降级到 flash 模型(%s)", m.models.Flash.Model)
+		m.history = append(m.history, agent.ChatMessage{Role: "assistant", Content: msg})
+		m.appendChat("assistant", msg)
+		if m.session != nil {
+			_ = m.session.Append("assistant", msg)
+		}
 	case "/help":
 		m.appendChat("assistant", T("help.body"))
 	default:

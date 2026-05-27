@@ -375,6 +375,8 @@ func BuildSystemPrompt(workspace, skillCatalog, summary string) string {
 	return base
 }
 
+// forceRole 非空时,强制使用该角色(跳过 RouteByKeyword 关键词路由)。
+// 用于 TUI 层的"pro 保持 N 轮"机制。
 func StartStream(
 	ctx context.Context,
 	models ModelConfig,
@@ -384,6 +386,7 @@ func StartStream(
 	workspace string,
 	skillCatalog string, // 见下方 system prompt 注入逻辑;空串表示当前没有 skill
 	summary string, // 会话压缩摘要,垫在 system prompt 末尾;空串表示尚未压缩
+	forceRole string, // 非空时强制指定起手角色,跳过 RouteByKeyword
 ) (tea.Cmd, <-chan tea.Msg) {
 	ch := make(chan tea.Msg, 128)
 
@@ -418,10 +421,16 @@ func StartStream(
 
 		// 入口路由:纯本地关键词 + 长度判定,零延迟,无 LLM 调用。
 		// 命中复杂关键词 / 消息 > 500 字 → pro;否则 flash。
+		// 如果 forceRole 非空,则跳过 RouteByKeyword,强制使用指定角色(pro 保持机制)。
 		// 本轮锁定该模型,主循环不再切换 — plan 节点可独立指定 model 字段,
 		// 由 sub-agent 按节点要求路由,跟"起手模型"解耦。
 		if latestUserTask != "" && models.Pro.Model != "" {
-			choice := RouteByKeyword(latestUserTask)
+			choice := ""
+			if forceRole != "" {
+				choice = forceRole
+			} else {
+				choice = RouteByKeyword(latestUserTask)
+			}
 			if choice == "pro" {
 				role = tools.RolePro
 				currentEntry = models.Pro
@@ -632,6 +641,16 @@ func StartStream(
 				})
 			}
 			ch <- HistoryUpdateMsg{History: convo}
+
+			// C: 两阶段级联 — 如果 flash 首轮就调用了 ≥2 个不同"主动"工具(写文件/执行命令等),
+			// 说明任务确实复杂,自动升级到 pro 处理后续推理。
+			if role == tools.RoleFlash && round == 0 && models.Pro.Model != "" {
+				if cnt := distinctActiveToolCount(toolCalls); cnt >= 2 {
+					role = tools.RolePro
+					currentEntry = models.Pro
+					ch <- ModelSwitchMsg{Role: role, ModelID: currentEntry.Model, Reason: "首轮使用了多个工具,自动升级到 pro"}
+				}
+			}
 		}
 
 		ch <- StreamErrMsg{fmt.Errorf("超过工具调用轮数上限")}
@@ -828,4 +847,32 @@ func executeTool(tc ToolCall, mode AgentMode) tools.ToolResult {
 		}
 	}
 	return t.Executor(args)
+}
+
+// readOnlyTools 是不计入"主动工具"的信号集合。
+// 如果 flash 首轮只调用了这些工具,说明只是在做信息收集,不必升 pro。
+var readOnlyTools = map[string]bool{
+	"Read":     true,
+	"Grep":     true,
+	"List":     true,
+	"Glob":     true,
+	"Tree":     true,
+	"Search":   true,
+	"Fetch":    true,
+	"CodeGraph": true,
+	"Memory":   true,
+	"OCR":      true,
+	"LoadSkill": true,
+}
+
+// distinctActiveToolCount 统计 toolCalls 中不同的"主动"工具数(排除了 readOnlyTools)。
+// 用于两阶段级联:如果 flash 首轮调用了 ≥2 个不同主动工具,说明任务复杂,应升 pro。
+func distinctActiveToolCount(toolCalls []ToolCall) int {
+	seen := make(map[string]bool)
+	for _, tc := range toolCalls {
+		if !readOnlyTools[tc.Function.Name] {
+			seen[tc.Function.Name] = true
+		}
+	}
+	return len(seen)
 }

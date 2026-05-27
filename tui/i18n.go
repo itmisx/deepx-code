@@ -109,6 +109,10 @@ var translations = map[string]map[Lang]string{
 		LangZH: "手动压缩会话历史(保留 20%)",
 		LangEN: "Manually compact session history (keep 20%)",
 	},
+	"cmd.flash.desc": {
+		LangZH: "切回 flash 模型,取消 pro 保持",
+		LangEN: "Reset to flash model, cancel pro keep",
+	},
 	"cmd.help.desc": {
 		LangZH: "帮助",
 		LangEN: "Help",
@@ -126,6 +130,7 @@ var translations = map[string]map[Lang]string{
 			"- `/mcp-list` `/mcp-add` `/mcp-delete` — 管理 MCP server\n" +
 			"- `/lang` — 切换语言 (中/英)\n" +
 			"- `/compact` — 手动压缩会话历史(保留尾部 20%)\n" +
+			"- `/flash` — 切回 flash 模型(取消 pro 保持)\n" +
 			"- `/help` — 帮助\n\n" +
 			"**快捷键**\n\n" +
 			"- `Enter` — 发送\n" +
@@ -143,6 +148,7 @@ var translations = map[string]map[Lang]string{
 			"- `/mcp-list` `/mcp-add` `/mcp-delete` — Manage MCP servers\n" +
 			"- `/lang` — Switch language (zh/en)\n" +
 			"- `/compact` — Manually compact session history (keep last 20%)\n" +
+			"- `/flash` — Switch back to flash model (cancel pro keep)\n" +
 			"- `/help` — Help\n\n" +
 			"**Keybindings**\n\n" +
 			"- `Enter` — Send\n" +
