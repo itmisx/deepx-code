@@ -109,8 +109,93 @@ func (m model) scrollbarDividers(height int) []string {
 	return out
 }
 
+// estimateInputTotalLines 估算输入框当前显示总行数(含长行 wrap),用于滚动条是否显示的判定。
+// 按显示宽度(ansi.StringWidth)折行,正确处理中文/全角。m.input.Width() 已是内容列宽
+// (不含左侧 gutter,见 view.go 的 SetWidth),无需再减。
+func (m model) estimateInputTotalLines() int {
+	w := m.input.Width()
+	if w < 1 {
+		w = 1
+	}
+	total := 0
+	for _, line := range strings.Split(m.input.Value(), "\n") {
+		n := ansi.StringWidth(line)
+		rows := n / w
+		if n%w != 0 {
+			rows++
+		}
+		if rows < 1 {
+			rows = 1
+		}
+		total += rows
+	}
+	return total
+}
+
+// inputScrollbarDividers 生成输入区滚动条字形,对齐 chat 区的 scrollbarDividers:
+// 轨道暗色 ┃,可滚动时滑块亮白 ┃。输入区只有 inputTextRows 行可见,显示总行数超出才能滚,
+// 故按当前宽度估算 wrap 后的总行数(含长行折行)判断是否溢出。
+func (m model) inputScrollbarDividers() []string {
+	h := inputAreaHeight
+	track := scrollbarDividerStyle.Render("┃")
+	out := make([]string, h)
+	for i := range out {
+		out[i] = track
+	}
+	lines := m.estimateInputTotalLines()
+	visible := inputTextRows
+	if lines <= visible || h <= 0 {
+		return out // 不溢出 → 纯轨道
+	}
+	total := lines
+	thumb := h * visible / total
+	if thumb < 1 {
+		thumb = 1
+	}
+	if thumb > h {
+		thumb = h
+	}
+	// 滑块位置直接用 textarea 真实滚动比例(ScrollPercent,viewport 内部维护),
+	// 不依赖估算的 total,避免估算偏差把 pos 算到边界卡死不动。
+	pos := int(m.input.ScrollPercent() * float64(h-thumb))
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > h-thumb {
+		pos = h - thumb
+	}
+	thumbStr := scrollbarThumbStyle.Render("┃")
+	for i := pos; i < pos+thumb && i < h; i++ {
+		out[i] = thumbStr
+	}
+	return out
+}
+
 // scrollChatToTrackRow 把滚动条轨道上的第 row 行(光标 Y - chatTop)映射成 chat 的滚动偏移并应用。
 // trackH 是轨道高度(= 可视行数)。滑块中心贴着光标;越界自动钳到 [0, maxOff]。内容不溢出则什么都不做。
+// inputScrollRegion 返回输入区滚动条在屏幕上的行区间 [top, bottom),
+// 必须与 View() 绘制时用的 bodyH/queuedH 计算完全一致(含 queuedH 扣减与 clamp),
+// 否则拖拽/点击落点与可视滑块错位(见 #1:原拖拽用 vpH+1、m.height 算,
+// 与 View 画的 [bodyH+1, bodyH+1+inputAreaHeight) 差一个常量行、并在有排队行时差 queuedH 行)。
+func (m model) inputScrollRegion() (top, bottom int) {
+	leftW, _ := m.layout()
+	queuedLines := m.queuedDisplayLines(leftW)
+	if maxQ := m.height - inputAreaHeight - 1; len(queuedLines) > maxQ {
+		if maxQ < 0 {
+			maxQ = 0
+		}
+		queuedLines = queuedLines[:maxQ]
+	}
+	queuedH := len(queuedLines)
+	bodyH := m.height - inputAreaHeight - queuedH
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	top = bodyH + 1
+	bottom = top + inputAreaHeight
+	return
+}
+
 func (m *model) scrollChatToTrackRow(row, trackH int) {
 	total := m.chatViewport.TotalLineCount()
 	visible := m.chatViewport.Height()
@@ -136,6 +221,58 @@ func (m *model) scrollChatToTrackRow(row, trackH int) {
 		target = maxOff
 	}
 	m.chatViewport.SetYOffset(target)
+}
+
+// scrollInputToTrackRow 把输入区滚动条轨道上的第 row 行映射成 textarea 的滚动位置并应用。
+// textarea 的滚动由光标驱动,故按目标显示行与当前光标显示行的差,用 CursorUp/Down 移动光标
+// (每调一次移一个逻辑行)。trackH 是轨道高度(= 输入区可视行数)。内容不溢出则什么都不做。
+// 顶部/底部用 MoveToBegin/MoveToEnd 直接跳转,避免 ScrollPercent 浮点精度损失导致"差一点到不了顶"。
+func (m *model) scrollInputToTrackRow(row, trackH int) {
+	total := m.estimateInputTotalLines()
+	visible := inputTextRows
+	if total <= visible || visible <= 0 || trackH <= 0 {
+		return
+	}
+	thumb := trackH * visible / total
+	if thumb < 1 {
+		thumb = 1
+	}
+	if thumb > trackH {
+		thumb = trackH
+	}
+	// 目标显示行(滑块中心对齐点击处),钳到 [0, total-visible]
+	maxOff := total - visible
+	target := maxOff
+	if denom := trackH - thumb; denom > 0 {
+		target = (row - thumb/2) * maxOff / denom
+	}
+	if target < 0 {
+		target = 0
+	}
+	if target > maxOff {
+		target = maxOff
+	}
+	// 两端精确跳转,消除 ScrollPercent 浮点截断导致的"差一点"问题
+	if target == 0 {
+		m.input.MoveToBegin()
+		return
+	}
+	if target == maxOff {
+		m.input.MoveToEnd()
+		return
+	}
+	// 中间区域:用 ScrollPercent 反推当前显示行,差值转成 CursorUp/Down 次数
+	cur := int(m.input.ScrollPercent() * float64(maxOff))
+	delta := cur - target // >0 表示要上移(delta 个逻辑行)
+	if delta > 0 {
+		for i := 0; i < delta; i++ {
+			m.input.CursorUp()
+		}
+	} else if delta < 0 {
+		for i := 0; i < -delta; i++ {
+			m.input.CursorDown()
+		}
+	}
 }
 
 // layout 计算 chat viewport 的宽度与高度。
@@ -277,8 +414,10 @@ func (m model) View() tea.View {
 	}
 
 	// 分隔线始终贯穿全高:对话区那 bodyH 行是滚动条(可拖滑块,亮白滑块+暗轨道),
-	// 其余行(输入区)是纯暗色 ┃ —— 状态栏显隐都一样,线一直到底。
+	// 输入区段也画一条对齐的滚动条(可滚时亮白滑块),其余行纯暗色 ┃ —— 线一直到底。
 	divs := m.scrollbarDividers(bodyH)
+	inputDivs := m.inputScrollbarDividers()
+	inputStart := bodyH + 1 // 分隔线占用 bodyH 那一行,输入区从下一行起
 	track := scrollbarDividerStyle.Render("┃")
 	rows := make([]string, m.height)
 	for i := 0; i < m.height; i++ {
@@ -289,6 +428,8 @@ func (m model) View() tea.View {
 		d := track
 		if i < bodyH && i < len(divs) {
 			d = divs[i]
+		} else if i >= inputStart && i < inputStart+len(inputDivs) {
+			d = inputDivs[i-inputStart]
 		}
 		r := ""
 		if i < len(rightCol) {

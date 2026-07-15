@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,18 @@ func TestUpdatePreviewLineNumbers(t *testing.T) {
 	if err := os.WriteFile(path, []byte("line1\nline2\nline3\nline4\n"), 0o644); err != nil {
 		t.Fatalf("write sample: %v", err)
 	}
-	args := `{"path":"` + path + `","old_string":"line2\nline3","new_string":"newA\nnewB"}`
+	// 用 json.Marshal 构造,正确转义 Windows 反斜杠路径(否则 C:\...\sample.txt
+	// 里的反斜杠会让 Unmarshal 失败、函数退化成 "Update"——这是 Windows 下
+	// 该测试失败的真因(t.TempDir() 在非 Unix 返回反斜杠路径)。
+	argsBytes, err := json.Marshal(map[string]string{
+		"path":       path,
+		"old_string": "line2\nline3",
+		"new_string": "newA\nnewB",
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+	args := string(argsBytes)
 	out := formatUpdatePreview(args)
 	if !strings.Contains(out, "2 - line2") {
 		t.Errorf("expected '2 - line2', got:\n%s", out)

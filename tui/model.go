@@ -37,6 +37,51 @@ var imagePlaceholderRe = regexp.MustCompile(`\[Image #(\d+)\]`)
 // 双击/点击时常有 1~2 格抖动,设 3 可把这种抖动挡在外面,只有真拖动才全选。
 const inputDragThreshold = 3
 
+// 长文本粘贴阈值:超过 800 字符或超过 2 行(换行数)的文本,不直接塞进输入框,
+// 而是存全文、在输入框放占位符 [Pasted text #N +X lines]。参考 free-code 的 PASTE_THRESHOLD。
+const pasteTextThreshold = 800
+const pasteLineThreshold = 2
+
+// formatPastedTextRef 生成长文本粘贴占位符,与 free-code 一致:[Pasted text #N +X lines]。
+func formatPastedTextRef(id, numLines int) string {
+	if numLines == 0 {
+		return fmt.Sprintf("[Pasted text #%d]", id)
+	}
+	return fmt.Sprintf("[Pasted text #%d +%d lines]", id, numLines)
+}
+
+// expandPastedTextRefs 把输入框里的 [Pasted text #N +X lines] 占位符展开回全文(发送前调用)。
+// 多个占位符反向替换(靠后的先替,保住前面偏移有效)。无对应存储的内容则保留占位符原样。
+func expandPastedTextRefs(input string, store map[int]string) string {
+	re := regexp.MustCompile(`\[Pasted text #(\d+)(?: \+\d+ lines)?\]`)
+	matches := re.FindAllStringSubmatchIndex(input, -1)
+	for i := len(matches) - 1; i >= 0; i-- {
+		m := matches[i]
+		idStr := input[m[2]:m[3]]
+		id := 0
+		for _, c := range idStr {
+			id = id*10 + int(c-'0')
+		}
+		full, ok := store[id]
+		if !ok {
+			continue
+		}
+		input = input[:m[0]] + full + input[m[1]:]
+	}
+	return input
+}
+
+// normalizeNewlines 把 Windows(\r\n) / 老 Mac(\r) 换行统一成 \n。
+// 必须在文本进入 textarea 之前做:textarea 内置的 runeutil.Sanitizer 会把
+// \r 与 \n 各自替换成 \n,导致 \r\n 变成 \n\n(行被翻倍、历史/输入框显示错乱)。
+// 先归一化,textarea 就只会看到纯 \n,不再翻倍——与 free-code 在输入框组件层
+// (.replace(/\r/g, "\n")) 的做法一致。
+func normalizeNewlines(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return s
+}
+
 type model struct {
 	width  int
 	height int
@@ -109,6 +154,12 @@ type model struct {
 	inputHistoryIndex int
 	inputDraft        string
 
+	// pastedTexts 存"长文本粘贴"的全文(按 id 索引);输入框里只放 [Pasted text #N +X lines]
+	// 占位符,避免超长文本被 textarea 的 CharLimit 截断、也不撑爆输入区。发送时再展开回全文。
+	// 参考 free-code 的 pastedContents 机制。短粘贴(< 阈值)不走这里,直接进输入框。
+	pastedTexts map[int]string
+	nextPasteID  int
+
 	currentReply *strings.Builder
 
 	// 待发送的图片已落盘文件路径,Ctrl+V 累加,enter 后清空。
@@ -164,6 +215,8 @@ type model struct {
 
 	// scrollbarDragging 表示左键正按在 chat 滚动条上拖动:MouseMotion 时把光标 Y 映射成滚动偏移。
 	scrollbarDragging bool
+	// inputScrollbarDragging 表示左键正按在输入区滚动条上拖动:用光标上/下驱动 textarea 滚动。
+	inputScrollbarDragging bool
 
 	// copyHint 复制成功后的临时提示("✓ 已复制"),叠在鼠标松开的位置 (copyHintX/Y),
 	// 1.5s 后由 copyHintClearMsg 清空。空串 = 不显示。
@@ -227,9 +280,15 @@ type model struct {
 	shadowDonePct int
 	compactGen    int
 
-	// pendingUserText:本轮用户输入原文,发送时暂存、本轮成功后才写入 jsonl(连同 assistant)。
-	// 这样 503/失败/取消的轮次不会在 jsonl 里留下没有回复的孤儿 user 记录。
+	// pendingUserText:本轮用户输入「展开后的全文」,发送时暂存、本轮成功后才写入 jsonl
+	// (连同 assistant)。长文本粘贴在此已是展开态,落盘保存的是完整正文,正确。
+	// 注意:jsonl 要全文,但输入框回填(打断/中断时)绝不能填全文 —— 4000 上限的输入框
+	// 装不下 190 行,会被截断丢失。所以回填另用 pendingInputOriginal(见下)。
 	pendingUserText string
+	// pendingInputOriginal:本轮用户输入「原始形态」(含长文本粘贴占位符 [Pasted text #N +X lines],
+	// 未展开)。仅供「打断后回填输入框」使用,保持占位符形态避免塞爆输入框被截断。
+	// 与 pendingUserText 区分:后者展开后用于 jsonl 落盘,前者占位符用于输入框回填。
+	pendingInputOriginal string
 
 	// review 模式审核状态
 	reviewPending  bool
@@ -1000,6 +1059,18 @@ func (m *model) applyStaleShadow() {
 }
 
 func (m model) submitUserInput(input string) (model, tea.Cmd) {
+	// 暂存「原始输入」(含长文本粘贴占位符、未展开):专供打断后回填输入框,
+	// 必须保持占位符形态 —— 否则 190 行全文塞回 4000 上限的输入框会被截断、丢失。
+	// 展开后的全文另存 pendingUserText(下方),只用于本轮成功后的 jsonl 落盘。
+	m.pendingInputOriginal = input
+	// 发送前把长文本粘贴占位符 [Pasted text #N +X lines] 展开回全文(参考 free-code)。
+	// 还原后可能远超过 textarea 的 CharLimit,但此时已离开输入框、直接送模型,不受限。
+	input = expandPastedTextRefs(input, m.pastedTexts)
+	// 粘贴文本可能含 Windows 换行 \r\n 或单独的 \r。\r\n 在后续渲染链里会被
+	// chatViewport.SetContentLines 拆成多行,但单独的 \r 会留在行尾被终端当回车符执行,
+	// 导致光标跳回行首、后续字符覆盖前面 → 视觉错乱(只在顶部旧消息出现、底部正常)。
+	// 输入时(PasteMsg 处理)已统一过一次,这里再兜一层,从源头消除。
+	input = normalizeNewlines(input)
 	input = strings.TrimSpace(input)
 	// 删掉输入框里的 [Image #N] = 想移除那张图:据残留占位符裁剪待发图片列表,
 	// 否则删了占位符图却照发、非视觉模型还会反复 OCR(issue #146 的「删不掉」)。
@@ -1013,7 +1084,9 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 	// (issue #161:web 生成中发送直接消失)。排队原文含斜杠命令时,popQueuedInput 回灌本函数时
 	// streaming 已置 false,会照常走下面的斜杠解析——与终端排队原文再解析的行为一致。
 	if m.streaming || m.compactingFG {
-		m.queuedInput = append(m.queuedInput, input)
+		// 排「原始输入」(占位符),不是已展开的全文——否则排队再回灌本函数时
+		// pendingInputOriginal 会拿到展开态,打断回填输入框又会塞爆被截断。
+		m.queuedInput = append(m.queuedInput, m.pendingInputOriginal)
 		m.broadcastQueued()
 		m.refreshViewport()
 		return m, nil
@@ -1308,9 +1381,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showSetup || m.showLangModal || m.showWorkingModeModal || m.showModelModal || m.showSandboxModal || m.showReasoningModal || m.showSessionList || m.showProviderModal {
 			return m, nil
 		}
-		// 滚轮: 转给 viewport,顺便取消选区
+		// 滚轮:按鼠标所在区域分流——输入区翻多行输入,历史区翻对话;顺便取消选区
 		if m.selecting {
 			m.selecting = false
+		}
+		_, vpH := m.layout()
+		if msg.Y > vpH {
+			// 分隔线以下=输入区。textarea 的滚动由光标驱动(视口强制跟随光标),
+			// 直接透传 MouseWheelMsg 滚不动;改成发 KeyPressMsg 上/下,让光标移动带动视口滚动,
+			// 这样粘贴长文本后也能滚到开头(实测确认)。
+			key := tea.KeyDown
+			if msg.Button == tea.MouseWheelUp {
+				key = tea.KeyUp
+			}
+			var c tea.Cmd
+			m.input, c = m.input.Update(tea.KeyPressMsg(tea.Key{Code: key}))
+			return m, c
 		}
 		var c tea.Cmd
 		m.chatViewport, c = m.chatViewport.Update(msg)
@@ -1338,6 +1424,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 选区只认内容列 [chatLeft, leftW),分隔线列按 X 与上面互斥。
 		inChat := msg.X >= chatLeft && msg.X < leftW &&
 			msg.Y >= chatTop && msg.Y < chatBottom
+		// 输入区滚动条列(分隔线 X≈leftW,且 Y 在输入区段):优先判为拖动滚动条,
+		// 不能落到下面的 inInput(否则点滚动条会被当成进入输入编辑)。
+		// 用 inputScrollRegion() 取与 View() 绘制完全一致的滚动条行范围,
+		// 否则拖拽/点击落点与可视滑块错位(见 #1)。
+		inputTop, inputBottom := m.inputScrollRegion()
+		inInputScrollbar := msg.X >= leftW && msg.X < leftW+scrollbarWidth &&
+			msg.Y >= inputTop && msg.Y < inputBottom
+		if inInputScrollbar {
+			m.inputScrollbarDragging = true
+			m.scrollInputToTrackRow(msg.Y-inputTop, inputBottom-inputTop)
+			return m, nil
+		}
 		// 输入区:左列 body 下方那块(空白行 + textarea 行),Y ∈ [vpH, m.height) 且 X ∈ [0, leftW)。
 		// X 上界收到 leftW —— 右侧是全高状态栏,点那里不该进输入编辑。
 		inInput := msg.Y >= vpH && msg.Y < m.height && msg.X >= 0 && msg.X < leftW
@@ -1383,6 +1481,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 滚动条拖拽优先:正按在滚动条上 → 按光标 Y 滚动,return,不进选区逻辑。
 		if m.scrollbarDragging {
 			m.scrollChatToTrackRow(msg.Y-chatTop, vpH)
+			return m, nil
+		}
+		// 输入区滚动条拖拽:按光标 Y 驱动 textarea 光标上下移,return。
+		// 用 inputScrollRegion() 与 View() 绘制对齐(见 #1)。
+		if m.inputScrollbarDragging {
+			inputTop, inputBottom := m.inputScrollRegion()
+			m.scrollInputToTrackRow(msg.Y-inputTop, inputBottom-inputTop)
 			return m, nil
 		}
 
@@ -1443,6 +1548,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 滚动条拖拽松手:仅清除拖拽态,不做别的(不影响选区复制等)。
 		if m.scrollbarDragging {
 			m.scrollbarDragging = false
+			return m, nil
+		}
+		// 输入区滚动条拖拽松手:仅清除拖拽态。
+		if m.inputScrollbarDragging {
+			m.inputScrollbarDragging = false
 			return m, nil
 		}
 		// 输入框拖拽全选松手:复制整段输入框内容(不弹"已复制"提示)。
@@ -1520,9 +1630,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// 文本粘贴:让 textinput 处理
+		// 文本粘贴:超阈值(>800 字符或 >2 行)走占位符,否则让 textarea 正常接。
+		// 占位符方案避免超长文本被 textarea 的 CharLimit(4000)截断、也不撑爆输入区。
+		// 进入 textarea 之前先把 \r\n 归一为 \n:否则 textarea 的 Sanitizer 会把
+		// \r\n 拆成两个 \n(\r 一个、\n 一个),造成行翻倍、历史/输入框错乱(见 normalizeNewlines)。
+		text := msg.Content
+		text = normalizeNewlines(text)
+		numLines := strings.Count(text, "\n")
+		if len(text) > pasteTextThreshold || numLines > pasteLineThreshold {
+			if m.pastedTexts == nil {
+				m.pastedTexts = make(map[int]string)
+			}
+			id := m.nextPasteID
+			m.nextPasteID++
+			m.pastedTexts[id] = text
+			m.input.InsertString(formatPastedTextRef(id, numLines))
+			return m, nil
+		}
 		var c tea.Cmd
-		m.input, c = m.input.Update(msg)
+		m.input, c = m.input.Update(tea.PasteMsg{Content: text})
 		return m, c
 
 	case tea.KeyPressMsg:
@@ -2264,12 +2390,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// 窗口内第二次:真正中断。
 				m.lastEscAt = time.Time{}
 				m = m.interruptStream()
-				// 打断后把这一轮的用户输入回填到空输入框,方便改一下重发。
-				// pendingUserText 是本轮原文(StreamDoneMsg 成功后才清空,所以打断时仍在);
-				// 仅当输入框为空时回填,不覆盖用户已敲入的新内容。
-				if strings.TrimSpace(m.input.Value()) == "" && m.pendingUserText != "" {
-					m.input.SetValue(m.pendingUserText)
-				}
+			// 打断后把这一轮的用户输入回填到空输入框,方便改一下重发。
+			// 用 pendingInputOriginal(原始形态、含粘贴占位符),不要用 pendingUserText
+			// (已展开的全文):190 行全文塞回 4000 上限的输入框会被截断、丢失。
+			// 仅当输入框为空时回填,不覆盖用户已敲入的新内容。
+			if strings.TrimSpace(m.input.Value()) == "" && m.pendingInputOriginal != "" {
+				m.input.SetValue(m.pendingInputOriginal)
+			}
 				m.refreshViewport()
 				return m, nil
 			}
@@ -2282,14 +2409,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chatViewport, c = m.chatViewport.Update(msg)
 			return m, c
 		case "up":
-			// ↑ 键：光标在第一行（或输入框为空）时，翻阅上一条历史。
-			// 有弹窗/流式中/输入框非空且光标不在首行时不拦截，交给 textarea 处理光标移动。
+			// ↑ 键：光标在「内容最顶端」（或输入框为空）时，翻阅上一条历史。
+			// 判定顶端必须同时满足:内容行 == 0 且处于该行顶部虚拟行(RowOffset == 0)。
+			// 否则(如首行是长行被折成多虚拟行、光标在其中下移过)交给 textarea 在折行内上移光标,
+			// 不能误判为「已在首行」而触发历史翻阅(否则长文本里键盘 ↑ 完全失效、只能靠鼠标滚轮)——见 bug。
+			// 有弹窗/流式中时不拦截，交给 textarea 处理光标移动。
 			if m.showSetup || m.showMcpAdd || m.showReasoningModal ||
 				m.showSkillAdd || m.showWebConfig || m.askPending || m.reviewPending {
 				// 弹窗打开时不拦截，让 textarea 处理
 			} else if m.streaming || m.compactingFG {
 				// 流式中不拦截
-			} else if m.input.Value() == "" || m.input.Line() == 0 {
+			} else if m.input.Value() == "" ||
+				(m.input.Line() == 0 && m.input.LineInfo().RowOffset == 0) {
 				m.navigateHistoryUp()
 				return m, nil
 			}

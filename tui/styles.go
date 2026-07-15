@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -222,7 +223,16 @@ func renderUserBubble(text string, viewportW int) string {
 		Width(boxW).
 		Padding(0, 1)
 	bar := lipgloss.NewStyle().Foreground(userBubbleBar).Render("┃")
-	lines := strings.Split(box.Render(text), "\n")
+	// lipgloss 的 Width 只做按词边界的软折行:超长无空格单行(日志/JSON/minified 代码)
+	// 找不到断词点就不硬断,会横向溢出 chat 区。再套一层 ansi.Wrap 做硬折行兜底,
+	// 任何超宽行都被强制断到内容区宽内(box 带左右 Padding(0,1) 各 1 列,内容宽 = boxW-2),
+	// 与模型回复走 glamour 的一致,避免粘贴长文本后错乱。
+	innerW := boxW - 2
+	if innerW < 1 {
+		innerW = 1
+	}
+	rendered := ansi.Wrap(box.Render(text), innerW, "")
+	lines := strings.Split(rendered, "\n")
 	for i, ln := range lines {
 		lines[i] = bar + ln
 	}
