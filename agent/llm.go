@@ -1146,7 +1146,98 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// --- 流式请求的超时兜底(issue #181)---
+//
+// 此前主流式路径上一个超时都没有:ctx 来自 context.WithCancel(无 deadline)、用的是
+// http.DefaultClient(Timeout 为 0)、SSE 读取是裸 scanner.Scan() 阻塞。端点接了连接却不吐
+// 数据时会无限等下去,UI 上就是 spinner 一直转、用户完全不知道卡在哪(OpenRouter 实测 20 分钟)。
+// 注意 maxNoProgressRounds 兜不住这种情况:它数的是「轮次」,而流卡死时根本进不到下一轮。
+//
+// 刻意不做「总时长超时」:推理模型思考十几分钟是合法的,按总时长砍会误杀长任务。判据改用
+// 「空闲」—— 连接活着时 SSE 上一定有东西在流(推理模型持续吐 reasoning_content;纯思考期
+// 网关也会发 keep-alive 注释行)。连续这么久一个字节都收不到 = 连接已死。这个判据与「模型想
+// 多久」无关,所以能写死、不必做成配置项(issue #181 原提议是加一组超时环境变量)。
+
+// streamIdleTimeout:SSE 上连续这么久没收到任何一行(含 keep-alive 注释行)即判定卡死。
+// 远宽于任何网关的 keep-alive 间隔,又远小于用户能忍的等待。
+// 是 var 而非 const 仅为让测试能调小后跑真实的超时路径;运行时不改。
+var streamIdleTimeout = 120 * time.Second
+
+// streamHeaderTimeout:请求发出到响应头返回的上限。流式请求的响应头是立刻回的
+// (模型在响应头之后才开始吐 token),所以可以给得比较紧,且这一层的失败发生在流开始前,
+// 能直接复用下面的重试循环。
+//
+// 只用于流式:非流式请求(CallOnce / CallWithTools)的响应头要等整个生成完成才返回,
+// 套上这个超时会把大摘要直接掐死 —— 那条路已由 compactionTimeout 兜住,别动。
+const streamHeaderTimeout = 60 * time.Second
+
+// errStreamIdle 是空闲看门狗触发时的哨兵错误(实际返回的是包了具体时长的 wrap,
+// 用 errors.Is 判定)。必须能和 context.Canceled 区分开:后者是用户按 ESC、上层静默收尾,
+// 前者要明确告诉用户卡在哪(issue #181 的核心诉求)。
+var errStreamIdle = errors.New("流式响应空闲超时")
+
+// streamHTTPClient 专供流式请求:在 DefaultTransport 基础上只加响应头超时,
+// 连接池 / 代理 / TLS 等默认行为原样保留。不设 Client.Timeout —— 那是「整个请求(含读完 body)」
+// 的上限,对流式等于给回复长度设死线,长回复会被拦腰砍断;「活着但不动」由空闲看门狗负责。
+var streamHTTPClient = &http.Client{
+	Transport: func() http.RoundTripper {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.ResponseHeaderTimeout = streamHeaderTimeout
+		return tr
+	}(),
+}
+
+// streamCtxErr 把 ctx 取消翻译成对上层有意义的错误:空闲看门狗触发 → errStreamIdle
+// (可读、会展示给用户);否则是用户 ESC / 退出 → context.Canceled(上层静默收尾)。
+func streamCtxErr(ctx context.Context) error {
+	if cause := context.Cause(ctx); errors.Is(cause, errStreamIdle) {
+		return cause
+	}
+	return ctx.Err()
+}
+
+// maxIdleRetries:空闲超时后的最大重试次数。刻意远小于 maxAPIRetries(10)——
+// 每次要先空等满 streamIdleTimeout(120s)才能判定,复用 10 次就是 20 分钟起步,
+// 正好复刻 issue #181 抱怨的那种「转到天荒地老」。2 次 = 最坏约 6 分钟,且全程
+// 状态行有「重试 N/2 · 响应超时」可看,而不是一个什么都不说的 spinner。
+const maxIdleRetries = 2
+
+// streamOnce 在 streamAttempt 之上加一层「空闲超时重试」。
+//
+// 只在「空闲超时 且 这次尝试零输出」时重来:此刻没有任何 token 吐给 UI、assistant 也没进历史,
+// 重试是干净的(与 maxAPIRetries 只重试「进流式之前」是同一条原则)。一旦已经吐过字,
+// 重试会让内容重复出现在对话区,所以直接把错误连同已吐内容返回,由上层收尾。
+//
+// 每次尝试内部各自派生可取消 ctx(见 streamAttempt),所以被看门狗 cancel 掉的 ctx
+// 不会污染下一次重试;父 ctx(用户 ESC)始终原样透传。
 func streamOnce(
+	ctx context.Context,
+	apiKey, baseURL, modelID string,
+	convo []ChatMessage,
+	maxTokens int,
+	toolSpecs []tools.OpenAIToolSpec,
+	reasoningEffort string,
+	thinking string,
+	ch chan<- tea.Msg,
+) (string, string, []ToolCall, string, *UsageInfo, error) {
+	for attempt := 0; ; attempt++ {
+		content, reasoning, toolCalls, finishReason, usage, err := streamAttempt(
+			ctx, apiKey, baseURL, modelID, convo, maxTokens, toolSpecs, reasoningEffort, thinking, ch,
+		)
+		emitted := content != "" || reasoning != "" || len(toolCalls) > 0
+		if !errors.Is(err, errStreamIdle) || emitted || attempt >= maxIdleRetries {
+			return content, reasoning, toolCalls, finishReason, usage, err
+		}
+		// 零输出的空闲超时 → 干净重试。复用同一套退避 + 状态行提示。
+		d := retryBackoff(attempt, "")
+		ch <- RetryNoticeMsg{Attempt: attempt + 1, Max: maxIdleRetries, Delay: d, Reason: "响应超时"}
+		if !sleepCtx(ctx, d) { // 退避期间用户 ESC
+			return content, reasoning, toolCalls, finishReason, usage, ctx.Err()
+		}
+	}
+}
+
+func streamAttempt(
 	ctx context.Context,
 	apiKey, baseURL, modelID string,
 	convo []ChatMessage,
@@ -1176,8 +1267,14 @@ func streamOnce(
 	if err != nil {
 		return "", "", nil, "", nil, err
 	}
+	// 包一层可取消 ctx:空闲看门狗要能掐断底层网络读,所以请求必须挂在它上面(见下方 scanner 循环)。
+	// 用 WithCancelCause 而非 WithCancel —— 看门狗取消时带上 errStreamIdle,才能和用户 ESC 区分开。
+	ctx, cancelStream := context.WithCancelCause(ctx)
+	defer cancelStream(nil)
+
 	// 进流式之前的失败(网络错 / 429 / 5xx)在这里重试:此刻一个 token 都还没吐给 UI、
 	// assistant 消息也没进历史,重试是干净的。进流式后的中途断(scanner.Err)不在此列。
+	// streamHeaderTimeout 触发的响应头超时也落在这里,会被当作「网络错误」自动重试。
 	var resp *http.Response
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewReader(body))
@@ -1188,7 +1285,7 @@ func streamOnce(
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 
 		var doErr error
-		resp, doErr = http.DefaultClient.Do(req)
+		resp, doErr = streamHTTPClient.Do(req)
 		if doErr == nil && resp.StatusCode == 200 {
 			break // 成功,进入下面的流式读取
 		}
@@ -1202,7 +1299,7 @@ func streamOnce(
 		)
 		if doErr != nil {
 			if ctx.Err() != nil { // ESC/退出导致的取消,不当作可重试错误
-				return "", "", nil, "", nil, ctx.Err()
+				return "", "", nil, "", nil, streamCtxErr(ctx)
 			}
 			retryable, failErr, reason = true, doErr, "网络错误"
 		} else {
@@ -1219,7 +1316,7 @@ func streamOnce(
 		d := retryBackoff(attempt, retryAfter)
 		ch <- RetryNoticeMsg{Attempt: attempt + 1, Max: maxAPIRetries, Delay: d, Reason: reason}
 		if !sleepCtx(ctx, d) { // 退避期间被 ESC/退出打断
-			return "", "", nil, "", nil, ctx.Err()
+			return "", "", nil, "", nil, streamCtxErr(ctx)
 		}
 	}
 	defer resp.Body.Close()
@@ -1235,7 +1332,20 @@ func streamOnce(
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	// 空闲看门狗:超时即 cancel,底层读被掐断 → scanner.Scan() 立刻返回 false。
+	// 每读到一行就续命(见循环内 Reset)。
+	idle := time.AfterFunc(streamIdleTimeout, func() {
+		cancelStream(fmt.Errorf("%w:%s 内未收到任何数据,端点无响应", errStreamIdle, streamIdleTimeout))
+	})
+	defer idle.Stop()
+
 	for scanner.Scan() {
+		// 续命必须在 data: 过滤之前 —— keep-alive 注释行(如 OpenRouter 的
+		// ": OPENROUTER PROCESSING")虽然没有负载,却正是「连接还活着」的证据。
+		// 只在 data: 行上续命的话,模型纯思考期会被误判成卡死。
+		idle.Reset(streamIdleTimeout)
+
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -1292,6 +1402,13 @@ func streamOnce(
 				cur.Function.Arguments += tc.Function.Arguments
 			}
 		}
+	}
+	idle.Stop()
+	// 看门狗已触发 → 无论 scanner 报的是 "context canceled" 还是干净 EOF,都按空闲超时收尾。
+	// 必须抢在下面的 scanner.Err() 之前:看门狗的取消在那里表现为 context.Canceled,
+	// 而上层(StartStream)对 context.Canceled 是静默 return 的,会把这次卡死悄悄吞掉。
+	if cause := context.Cause(ctx); errors.Is(cause, errStreamIdle) {
+		return contentBuilder.String(), reasoningBuilder.String(), nil, finishReason, lastUsage, cause
 	}
 	if err := scanner.Err(); err != nil {
 		return contentBuilder.String(), reasoningBuilder.String(), nil, finishReason, lastUsage, err

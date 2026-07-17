@@ -128,8 +128,10 @@ type model struct {
 
 	// balance 是右栏「模型厂商」段展示的账户剩余金额串(已含币种符号,如 "¥110.00")。
 	// "" = 尚未探到(不显示);"-" = 该供应商不支持查询(见 balance.go / agent.ProbeBalance)。
-	// 每次启动、改配置、切供应商时经 balanceMsg 回灌。
+	// 每次启动、改配置、切供应商、每轮回答结束时经 balanceMsg 回灌。
 	balance string
+	// balanceGen 是延迟重探的代数,每轮回答结束时 +1(见 balanceSettleTickMsg 的防抖)。
+	balanceGen int
 
 	mode        agent.AgentMode
 	workingMode agent.WorkingMode // 工作模式 kp/openspec/sp(默认 kp);每轮注入对应 skill 引导;按 session 保存/恢复
@@ -2511,6 +2513,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.broadcast(web.Event{Kind: "balance", Text: m.balance})
 		return m, nil
 
+	case balanceSettleTickMsg:
+		// 计费结算后的延迟重探到点(issue #182)。代数对不上 = 期间又答了新的一轮、
+		// 已有更晚的钟在排队 → 丢弃本次,避免连续对话攒一堆钟白打接口。
+		if msg.gen != m.balanceGen {
+			return m, nil
+		}
+		return m, balanceProbeCmd(m.models)
+
 	case agent.VisionUnsupportedMsg:
 		// 运行时自愈:某模型实际拒绝图片(agent 已自动改 OCR 重发)→ 把它标记为无视觉、纠正缓存,
 		// 下次发图不再对它用 base64。
@@ -2906,12 +2916,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// 本轮花了 token,余额变了:后台重探一次(仅 DeepSeek/Kimi 实际打接口,其它是 no-op)。
 		balCmd := balanceProbeCmd(m.models)
+		// 但供应商计费是滞后结算的,上面这次多半拿到的还是扣费前的数(issue #182:右栏比网页大、
+		// 显得「特别省钱」)。所以再挂一次 balanceSettleDelay 之后的重探来校准到真实值。
+		// balanceGen++ 即防抖:连续对话时每轮都重新挂钟,只有最后一轮那口钟会真的去查。
+		m.balanceGen++
+		settleCmd := balanceSettleCmd(m.balanceGen)
 
 		// 没触发实时压缩:有排队输入就发下一条;影子 Cmd(若有)并行后台跑,不阻塞用户。
 		if next, qcmd, ok := m.popQueuedInput(); ok {
-			return next, tea.Batch(shadowCmd, qcmd, balCmd)
+			return next, tea.Batch(shadowCmd, qcmd, balCmd, settleCmd)
 		}
-		return m, tea.Batch(shadowCmd, balCmd)
+		return m, tea.Batch(shadowCmd, balCmd, settleCmd)
 
 	case agent.StreamErrMsg:
 		if m.streamCh == nil {

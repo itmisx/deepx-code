@@ -55,6 +55,15 @@ body {
 .lang-select:hover { border-color: var(--accent2); }
 .lang-select:focus { outline: none; border-color: var(--accent2); }
 
+/* GitHub 仓库入口。.lang-select 的 margin-left:auto 已把这一组推到右侧,
+   两者靠 .topbar 的 gap 分隔。图标用 currentColor,hover 跟随 accent2 与语言选择器呼应。 */
+.gh-link {
+  display: flex; align-items: center; color: var(--dim);
+  text-decoration: none; border-radius: 999px; transition: color .15s;
+}
+.gh-link:hover { color: var(--accent2); }
+.gh-link:focus-visible { outline: none; color: var(--accent2); box-shadow: 0 0 0 2px var(--accent2); }
+
 /* 布局:左聊天 右状态 */
 .layout { flex: 1; display: flex; min-height: 0; }
 .chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
