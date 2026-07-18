@@ -2395,27 +2395,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chatViewport, c = m.chatViewport.Update(msg)
 			return m, c
 		case "up":
-			// ↑ 键：光标在首行（或输入框为空）时，翻阅上一条历史。
+			// ↑ 键：光标在「内容最顶端」（或输入框为空）时，翻阅上一条历史。
+			// 顶端必须同时满足：逻辑行 == 0 且处于该行顶部虚拟行（RowOffset == 0）。
+			// 否则（如首行是长行被软折成多个虚拟行、光标在其中下移过）交给 textarea
+			// 在折行内上移光标，不能误判为「已在首行」而触发历史翻阅 —— 否则长文本里
+			// 键盘 ↑ 完全失效、只能靠鼠标滚轮（见 up_wrap 回归测试）。
 			// 有弹窗/流式中时不拦截，交给 textarea 处理光标移动。
 			if m.showSetup || m.showMcpAdd || m.showReasoningModal ||
 				m.showSkillAdd || m.showWebConfig || m.askPending || m.reviewPending {
 				// 弹窗打开时不拦截，让 textarea 处理
 			} else if m.streaming || m.compactingFG {
 				// 流式中不拦截
-			} else if m.input.Value() == "" || m.input.Line() == 0 {
+			} else if m.input.Value() == "" ||
+				(m.input.Line() == 0 && m.input.LineInfo().RowOffset == 0) {
 				m.navigateHistoryUp()
 				return m, nil
 			}
 		case "down":
 			// ↓ 键：正在翻阅历史时，翻到下一条（更新的）消息；翻到底则恢复草稿。
+			// 与 ↑ 对称：只有光标已到当前历史项的「底部」（最后逻辑行 + 最后虚拟行）才翻下一条，
+			// 否则下移光标 —— 否则翻阅一条多行历史时,在中间行按 ↓ 会直接翻走、跳过多行内容
+			// （详见 down_history_nav 回归测试）。
 			if m.showSetup || m.showMcpAdd || m.showReasoningModal ||
 				m.showSkillAdd || m.showWebConfig || m.askPending || m.reviewPending {
 				// 弹窗打开时不拦截
 			} else if m.streaming || m.compactingFG {
 				// 流式中不拦截
 			} else if m.inputHistoryIndex >= 0 {
-				m.navigateHistoryDown()
-				return m, nil
+				li := m.input.LineInfo()
+				lastLine := strings.Count(m.input.Value(), "\n") // 最后逻辑行号(0-indexed)
+				atBottom := m.input.Line() == lastLine && li.RowOffset == li.Height-1
+				if atBottom {
+					m.navigateHistoryDown()
+					return m, nil
+				}
+				// 未到底部: 下放给 textarea 下移光标, 不翻历史
 			}
 		case "ctrl+j":
 			// 在光标处插入换行,实现多行输入。Enter 仍走下方 submit 分支。
