@@ -1416,18 +1416,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inputSelecting = false
 		m.refreshViewport()
 
-	case tea.MouseWheelMsg:
-		// modal 期间忽略
-		if m.showSetup || m.showLangModal || m.showWorkingModeModal || m.showModelModal || m.showSandboxModal || m.showReasoningModal || m.showSessionList || m.showProviderModal {
-			return m, nil
-		}
-		// 滚轮:转给 viewport,顺便取消选区
-		if m.selecting {
-			m.selecting = false
-		}
-		var c tea.Cmd
-		m.chatViewport, c = m.chatViewport.Update(msg)
-		return m, c
+		case tea.MouseWheelMsg:
+			// modal 期间忽略
+			if m.showSetup || m.showLangModal || m.showWorkingModeModal || m.showModelModal || m.showSandboxModal || m.showReasoningModal || m.showSessionList || m.showProviderModal {
+				return m, nil
+			}
+			// 滚轮:按鼠标所在区域分流——输入区翻多行输入,历史区翻对话;顺便取消选区
+			if m.selecting {
+				m.selecting = false
+			}
+			_, vpH := m.layout()
+			if msg.Y > vpH {
+				// 分隔线以下=输入区。textarea 的滚动由光标驱动(视口强制跟随光标),
+				// 直接透传 MouseWheelMsg 滚不动;改成发 KeyPressMsg 上/下,让光标移动带动视口滚动,
+				// 这样粘贴长文本后也能滚到开头(实测确认)。
+				key := tea.KeyDown
+				if msg.Button == tea.MouseWheelUp {
+					key = tea.KeyUp
+				}
+				var c tea.Cmd
+				m.input, c = m.input.Update(tea.KeyPressMsg(tea.Key{Code: key}))
+				return m, c
+			}
+			var c tea.Cmd
+			m.chatViewport, c = m.chatViewport.Update(msg)
+			return m, c
 
 	case tea.MouseClickMsg:
 		if m.showSetup || m.showLangModal || m.showWorkingModeModal || m.showModelModal || m.showSandboxModal || m.showReasoningModal || m.showSessionList || m.showProviderModal {
