@@ -47,7 +47,9 @@ func ProbeVision(ctx context.Context, entry ModelEntry) (bool, error) {
 	if entry.Model == "" || entry.BaseURL == "" {
 		return false, fmt.Errorf("probe: 模型或 base_url 为空")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	// 本地部署的大模型(llama.cpp 等)首次跑图推理可能较慢,给足 60s;超时按瞬时错误处理
+	// (不缓存,下次启动重探),避免把"能识图但慢"的模型误判成不支持视觉(issue #194)。
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	dataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(probeMarkerPNG)
