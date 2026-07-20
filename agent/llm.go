@@ -745,6 +745,9 @@ func StartStream(
 			//   - UpdatePlanStatus   → 解析后产 TaskStatusMsg,UI 更新单项状态
 			//   - SwitchModel        → 改本轮 currentEntry / role,通过 ModelSwitchMsg 通知 UI
 			// 拦截后仍要给 LLM 一个 fake tool result,让 OpenAI 工具循环能正常推进。
+			// pendingImageInjects:本轮被 redirect 的 OCR(视觉模型 + 真实外部图)对应的图片路径,
+			// 在 tc 循环收尾处统一追加成带图 user 消息,让模型下一轮直接看图(见 case "OCR",issue #194)。
+			var pendingImageInjects []string
 			for _, tc := range toolCalls {
 				// review 模式:对 Write/Update/Bash 发起审核。
 				// Workflow(run) 无论何种模式都强制确认:它会执行模型生成的脚本(进而派子 agent)。
@@ -941,6 +944,16 @@ func StartStream(
 							Output:  "这张图之前已经 OCR 过了,结果是:\n" + prev + "\n\n请勿对同一张图重复 OCR。若仍需要图中信息,请直接询问用户图里写了什么,或让用户改用支持视觉的模型。",
 							Success: false,
 						}
+					} else if img, ok := ocrImageFilePath(tc.Function.Arguments); currentEntry.Vision && ok {
+						// 视觉模型对一张真实存在的外部图片调 OCR:本地 OCR 精度不如模型多模态(issue #194)。
+						// 不跑本地 OCR,改为把该图内联进对话 —— 下方在 tc 循环收尾处追加一条带该图的 user 消息
+						// (ImagePaths,交给 renderConvoImages 下一轮按能力渲染成 base64),让模型直接看图作答。
+						// 追加(非改历史)不破前缀缓存;第二次对同一图 OCR 会被上面的 ocrTargetsInlinedImage 命中,不重复注入。
+						result = tools.ToolResult{
+							Output:  "当前模型支持视觉,已把该图片内联到对话,请直接查看图片作答,不要再调用 OCR。",
+							Success: true,
+						}
+						pendingImageInjects = append(pendingImageInjects, img)
 					} else {
 						result = executeTool(tc, mode, &lastFile)
 					}
@@ -982,6 +995,16 @@ func StartStream(
 					// 本轮合计上限:单条已被 clampToolOutput 限到 96KB,这里再按「本轮所有工具结果合计」收口,
 					// 防止一轮并发多条把上下文顶爆(issue #135)。只截入历史的内容,UI(上方 ToolCallResultMsg)仍展示完整结果。
 					Content: clampTurnToolOutput(tc.Function.Name, result.Output, &turnToolBytes),
+				})
+			}
+			// 视觉模型下被 redirect 的 OCR：把对应图片作为独立 user 消息追加进对话（带 ImagePaths，
+			// renderConvoImages 下一轮按当轮模型能力渲染成 base64 / 路径+OCR，切模型也安全）。
+			// 追加在所有 tool 结果之后，让模型下一轮直接看到内联的图（issue #194）。
+			for _, p := range pendingImageInjects {
+				convo = append(convo, ChatMessage{
+					Role:       "user",
+					Content:    "[Image #1]（上一步你请求 OCR 的图片，当前模型支持视觉，已内联在此，请直接识别，勿再调用 OCR。）",
+					ImagePaths: []string{p},
 				})
 			}
 			ch <- HistoryUpdateMsg{History: convo}

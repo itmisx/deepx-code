@@ -10,6 +10,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -39,6 +40,14 @@ func readClipboardImage() ([]byte, error) {
 	if avail == 0 {
 		return nil, errNoClipboardImage
 	}
+
+	// Windows 剪贴板按 OS 线程归属:OpenClipboard 在哪个线程开,必须在同一线程 CloseClipboard
+	// 才能成功关闭。Go 的 goroutine 会在 syscall 间被调度到别的 OS 线程 —— 尤其本函数下面
+	// 还要跑 dibToPNG(PNG 编码,耗时+分配)期间剪贴板一直开着,极易迁线程 → defer CloseClipboard
+	// 落到另一线程 → 关闭失败 → 剪贴板被全局锁死(issue #195)。锁住当前线程,把 open→close 钉在一起。
+	// defer 后进先出:UnlockOSThread 在 CloseClipboard 之后执行,保证关闭时仍在同一线程。
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 
 	var opened uintptr
 	// OpenClipboard 可能因为别人正在持有而短暂失败,重试几次。

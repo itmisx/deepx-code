@@ -251,6 +251,37 @@ func priorOCRResult(argsJSON string, convo []ChatMessage) (string, bool) {
 	return "", false
 }
 
+// imageFileExtRe 匹配图片文件扩展名(结尾)。
+var imageFileExtRe = regexp.MustCompile(`(?i)\.(?:png|jpe?g|gif|webp|bmp)$`)
+
+// ocrImageFilePath 解析 OCR 调用的 path 参数,若它指向一个"真实存在的本地图片文件",
+// 返回其绝对路径 + true;否则返回 "", false。
+//
+// 用途(issue #194):视觉模型对一张外部图片路径调 OCR 时,本地 OCR 精度不如模型多模态。
+// 命中即改为把该图内联进对话让模型直接看(见 llm.go case "OCR"),不跑本地 OCR。
+// 只认扩展名为常见图片格式、且 os.Stat 确认存在的普通文件 —— 不存在 / 目录一律不命中。
+func ocrImageFilePath(argsJSON string) (string, bool) {
+	var args struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) != nil {
+		return "", false
+	}
+	p := strings.TrimSpace(args.Path)
+	if p == "" || !imageFileExtRe.MatchString(p) {
+		return "", false
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", false
+	}
+	info, err := os.Stat(abs)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	return abs, true
+}
+
 // isImageInputUnsupported 判断错误是否是"该端点/模型不接受图片输入"(发了 base64 才会撞)。
 // 命中则上层把该模型降级为无视觉、改走 OCR 重发。匹配宽松些以兼容各家措辞。
 //   - MiMo: HTTP 404 "No endpoints found that support image input"

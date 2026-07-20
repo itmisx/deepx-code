@@ -127,16 +127,3 @@ func TestBackgroundUnknownID(t *testing.T) {
 		t.Fatal("空 id 应返回失败")
 	}
 }
-
-func extractID(t *testing.T, output string) string {
-	t.Helper()
-	_, rest, ok := strings.Cut(output, "id: ")
-	if !ok {
-		t.Fatalf("输出里找不到 id: %q", output)
-	}
-	end := strings.IndexAny(rest, ")\n ")
-	if end < 0 {
-		t.Fatalf("解析 id 失败: %q", output)
-	}
-	return rest[:end]
-}

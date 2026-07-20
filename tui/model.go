@@ -4104,7 +4104,7 @@ func (m *model) renderChatBaseContent(w int) string {
 	content := m.chatContent.Render(w, func(raw, kind string, width int) string {
 		// 用户回合走气泡(左块条 + 整段底色),不走 glamour / 色条,见 renderUserBubble。
 		if kind == kindUser {
-			return renderUserBubble(stripVS16(strings.TrimRight(ensureEmojiSpacing(raw), "\n")), width)
+			return renderUserBubble(stripVS16(stripEmojiZWJ(strings.TrimRight(ensureEmojiSpacing(raw), "\n"))), width)
 		}
 		var inner string
 		switch kind {
@@ -4115,7 +4115,7 @@ func (m *model) renderChatBaseContent(w int) string {
 		default:
 			inner = ensureEmojiSpacingANSI(m.renderMarkdown(ensureEmojiSpacing(raw), barInnerWidth(width, kind)))
 		}
-		inner = stripVS16(strings.TrimRight(inner, "\n"))
+		inner = stripVS16(stripEmojiZWJ(strings.TrimRight(inner, "\n")))
 		return applyQuoteBar(inner, kind)
 	})
 

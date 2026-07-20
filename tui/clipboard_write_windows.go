@@ -4,6 +4,7 @@ package tui
 
 import (
 	"errors"
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -31,6 +32,11 @@ func writeClipboardText(text string) error {
 	if err != nil {
 		return err // 文本里含 NUL 才会失败,选区文本不该有
 	}
+
+	// 锁住 OS 线程:Windows 剪贴板按线程归属,不锁则 OpenClipboard 与 defer CloseClipboard
+	// 可能落在不同线程 → 关闭失败、剪贴板被全局锁死(见 readClipboardImage / issue #195)。
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 
 	// OpenClipboard 可能因别人持有而短暂失败,重试几次(同 readClipboardImage)。
 	var opened uintptr

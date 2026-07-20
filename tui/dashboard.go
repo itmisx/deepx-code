@@ -311,3 +311,47 @@ func stripVS16(s string) string {
 	}
 	return strings.ReplaceAll(s, "️", "")
 }
+
+// stripEmojiZWJ 剥掉「两侧都是 emoji」的 ZWJ(U+200D),把 👨‍👩‍👧 这类组合拆成各自
+// 独立的 emoji(👨👩👧)。
+//
+// 为什么这么做:ZWJ 组合的显示宽度**各终端口径互不相同** —— deepx 按字素簇算 2,
+// DSR 探针实测 VSCode 渲 6、Terminal.app 渲 8、支持字素合并的终端渲 2。三方都不一样,
+// 不存在能同时满足的宽度模型(照哪家改都会弄坏另外两家)。剥掉 ZWJ 后它变成 N 个独立
+// emoji,deepx 与所有终端都算 N×2 → **终端无关地对齐**。
+//
+// 这与 stripVS16 是同一条原则:不去猜/复刻各终端怎么渲,而是**不发出「各家宽度有分歧」
+// 的字符**。VS16 那条已被验证有效(❤️ 剥成 ❤ 后两终端都是 1,不再偏)。
+//
+// 只在**前后都是 emoji** 时剥:ZWJ 在天城文 / 阿拉伯文等脚本里用于控制连字,
+// 普通文本里的 ZWJ 必须原样保留,否则会破坏这些语言的字形。
+func stripEmojiZWJ(s string) string {
+	if !strings.ContainsRune(s, 0x200D) {
+		return s
+	}
+	runes := []rune(s)
+	out := make([]rune, 0, len(runes))
+	for i, r := range runes {
+		if r == 0x200D &&
+			emojiBeforeIdx(runes, i) &&
+			i+1 < len(runes) && isEmojiLike(runes[i+1]) {
+			continue // 两侧都是 emoji → 剥掉这个 ZWJ
+		}
+		out = append(out, r)
+	}
+	return string(out)
+}
+
+// emojiBeforeIdx 从 i-1 往回找第一个「非修饰符」rune,判断它是不是 emoji。
+// 跳过变体选择符(FE0E/FE0F,如 🏳️‍🌈 里的)与肤色修饰符(1F3FB-1F3FF,如 👍🏽 里的),
+// 这些不是 emoji 本体但会夹在 emoji 与 ZWJ 之间。
+func emojiBeforeIdx(runes []rune, i int) bool {
+	for j := i - 1; j >= 0; j-- {
+		r := runes[j]
+		if (r >= 0xFE0E && r <= 0xFE0F) || (r >= 0x1F3FB && r <= 0x1F3FF) {
+			continue // 修饰符,继续往前找本体
+		}
+		return isEmojiLike(r)
+	}
+	return false
+}
