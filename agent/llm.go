@@ -236,6 +236,39 @@ type chatRequest struct {
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 }
 
+// maxToolArgBytes:单个工具调用的 arguments 上限。超过就截断(见 truncateToolArgs)。
+// 触发背景:模型曾把整页 ~27KB HTML 当 Write 参数内联发出,既触发 OpenRouter/Novita 的 400
+// (invalid_request_error),也会让本地 llama.cpp 在生成超大参数时 JSON 断尾报 500。
+// 16KB 是经验值:正常工具参数远小于此,只有"整篇文件内容内联"才会触顶。
+const maxToolArgBytes = 16 * 1024
+
+// truncateToolArgs 返回 convo 的副本,其中超长工具参数被替换为一个带 original_bytes 的
+// 合法 JSON 占位。这样发出去的请求仍是合法 JSON(不会因硬截断产生非法 tool_calls 被 API 再拒),
+// 同时把几十 KB 的内联内容(整页 HTML 等)从请求里拿掉,规避 Novita 400 与 llama.cpp 500。
+// 原始对话不被改动(走副本),且工具此前已用完整参数执行过、结果在后续 tool 消息里,截断历史无害。
+// 返回是否发生过截断。
+func truncateToolArgs(convo []ChatMessage) ([]ChatMessage, bool) {
+	truncated := false
+	out := make([]ChatMessage, len(convo))
+	copy(out, convo)
+	for i := range out {
+		if len(out[i].ToolCalls) == 0 {
+			continue
+		}
+		tcs := make([]ToolCall, len(out[i].ToolCalls))
+		copy(tcs, out[i].ToolCalls)
+		for j := range tcs {
+			if n := len(tcs[j].Function.Arguments); n > maxToolArgBytes {
+				tcs[j].Function.Arguments = fmt.Sprintf(
+					`{"_deepx_truncated":true,"original_bytes":%d}`, n)
+				truncated = true
+			}
+		}
+		out[i].ToolCalls = tcs
+	}
+	return out, truncated
+}
+
 // thinkingOption 是 DeepSeek 思考开关的请求体格式:`{"type": "enabled"}` 或 `{"type": "disabled"}`。
 // DeepSeek 默认 enabled,MiMo 默认 disabled。
 type thinkingOption struct {
@@ -332,6 +365,7 @@ type chatResponse struct {
 // CallOnce 发起一次非流式 chat completion 调用,直接返回 content 文本。
 // 不带 tools 参数,适用于摘要生成等一次性文本生成场景。
 func CallOnce(ctx context.Context, apiKey, baseURL, modelID string, convo []ChatMessage, maxTokens int) (string, error) {
+	convo, _ = truncateToolArgs(convo)
 	body, err := json.Marshal(chatRequest{
 		Model:     modelID,
 		MaxTokens: maxTokens,
@@ -374,6 +408,7 @@ func CallOnce(ctx context.Context, apiKey, baseURL, modelID string, convo []Chat
 // 用于缓存友好的压缩:摘要请求复刻会话的 [system][tools][history] 前缀,只在末尾追加压缩指令,
 // 从而命中已缓存的前缀(tools 必须和被缓存的那次逐字节一致才命中,故由调用方传入旧 specs)。
 func CallWithTools(ctx context.Context, apiKey, baseURL, modelID string, convo []ChatMessage, toolSpecs []tools.OpenAIToolSpec, maxTokens int) (string, error) {
+	convo, _ = truncateToolArgs(convo)
 	body, err := json.Marshal(chatRequest{
 		Model:     modelID,
 		MaxTokens: maxTokens,
@@ -1271,6 +1306,10 @@ func streamAttempt(
 	ch chan<- tea.Msg,
 ) (string, string, []ToolCall, string, *UsageInfo, error) {
 
+	// 发送前消毒:剔除孤儿 tool 消息 / 剥掉无响应的 tool_calls,避免 API 400(见 issue #94),
+	// 并自愈已被写进历史的坏配对(下次请求即恢复)。正常对话是 no-op。
+	truncatedConvo, _ := truncateToolArgs(convo)
+	sanitized := sanitizeToolPairs(truncatedConvo)
 	body, err := json.Marshal(chatRequest{
 		Model:     modelID,
 		MaxTokens: maxTokens,
@@ -1278,9 +1317,7 @@ func streamAttempt(
 		StreamOptions: &streamOptions{
 			IncludeUsage: true,
 		},
-		// 发送前消毒:剔除孤儿 tool 消息 / 剥掉无响应的 tool_calls,避免 API 400(见 issue #94),
-		// 并自愈已被写进历史的坏配对(下次请求即恢复)。正常对话是 no-op。
-		Messages: sanitizeToolPairs(convo),
+		Messages: sanitized,
 		Tools:    toolSpecs,
 		// thinking 和 reasoning_effort 是两个独立顶层字段。各自 omitempty,
 		// 用户设了就发、没设就不发,白名单内的值才透传(防 yaml 笔误)。
