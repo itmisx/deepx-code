@@ -298,6 +298,12 @@ type model struct {
 	// 不再作为 history[0] 消息存在;持久化在 state.json 的 summary 字段。
 	summary string
 
+	// topicGraph 是本地主题追踪图, 追踪对话主题的演化。
+	// 每轮 user 消息后自动更新, 供压缩时策略性选择保留内容(Phase 2)。
+	topicGraph *agent.TopicGraph
+	// lastFocusID 上一次焦点话题 ID, 用于 FocusChanged 检测。
+	lastFocusID int
+
 	// 重启缓存友好压缩:detectRestartCompaction 检测到前缀变化时暂存上次前缀快照,
 	// Init 时用 restartCompactionCmd 在首请求前跑一次压缩(见 prefix_cache.go)。
 	pendingCompactModel string
@@ -697,6 +703,20 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 	// 粘贴图片缓存:跟 OCR 解耦后改由这里按时效清理(超过 7 天的旧图删掉),不阻塞启动。
 	go tools.SweepPasteCache(7 * 24 * time.Hour)
 
+	// 加载分词器配置(~/.deepx/segmenter.yaml)。
+	// 不配置 language 则不启用, topicGraph 保持 nil。
+	segCfg, _ := config.LoadSegmenter()
+	var segmenter agent.Segmenter
+	var segErr error
+	if segCfg != nil && segCfg.Language != "" {
+		segCacheDir, _ := config.SegmenterDir()
+		segmenter, segErr = agent.NewSegmenter(segCfg.Language, segCacheDir)
+	}
+	var topicGraph *agent.TopicGraph
+	if segmenter != nil {
+		topicGraph = agent.NewTopicGraph(segmenter)
+	}
+
 	m := model{
 		mcpMgr:          mcpMgr,
 		mcpAddInput:     mi,
@@ -728,6 +748,7 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 		hub:             hub,
 		srv:             srv,
 		webURL:          webURL,
+		topicGraph:      topicGraph,
 		inputHistoryIndex: -1,
 	}
 
@@ -773,6 +794,10 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 				gobHistory = gobHistory[1:]
 			}
 			m.history = gobHistory
+			// 从 gob 恢复的历史重建主题追踪图。
+			if m.topicGraph != nil {
+				m.topicGraph.Rebuild(gobHistory)
+			}
 			rebuildChatFromHistory(m.chatContent, gobHistory)
 			// 老对话(升级前就有 history、没 conv.json)首次进 /sessions 别显示"(未命名)":
 			// 用第一条用户消息回填标题。session 包自己解码不了 history.gob,放这儿做。
@@ -831,6 +856,11 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 				}
 			}
 
+			// 从 JSONL 兜底恢复的历史重建主题追踪图。
+			if m.topicGraph != nil && len(m.history) > 0 {
+				m.topicGraph.Rebuild(m.history)
+			}
+
 			// 声明当前模式,通知 LLM 当前状态。模式始终从 auto 起步(默认全工具)。
 			// 注意:gob 恢复时跳过此步骤 — 历史已包含之前的 mode notification,
 			// 重复追加会在每次重启时累积,污染 LLM 上下文。
@@ -854,6 +884,13 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 
 	// 每次启动的欢迎语。
 	m.appendChat("System", T("welcome"))
+
+	// 分词器状态提示:配置了 segmenter: zh 但启动失败时告知用户。
+	if segErr != nil {
+		m.appendChat("System", "⚠️ 分词器(zh)初始化失败: "+segErr.Error())
+	} else if segCfg != nil && segCfg.Language != "" && segmenter == nil {
+		m.appendChat("System", "⚠️ 分词器("+segCfg.Language+")未就绪, 请检查网络后重启")
+	}
 
 	// web 控制面板启用时,在 chat 区给出可点击 / 可复制的地址 —— 浏览器里能新建会话、
 	// 切会话、切权限/沙箱/工作模式,状态与终端实时对齐。
@@ -1166,6 +1203,22 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 	userMsg := m.buildUserMessage(input)
 	m.appendChat("You", input)
 	m.history = append(m.history, userMsg)
+	// 本地主题追踪: 每轮 user 消息后更新主题图(仅分词器启用时)。
+	if m.topicGraph != nil {
+		m.topicGraph.TrackMessage(input, len(m.history)-1)
+		// 话题切换检测: 有意义的旧话题存在, 且当前消息创建了新话题 → 提醒
+		if switched, oldKW, _ := m.topicGraph.TopicSwitched(3); switched {
+			oldLabel := strings.Join(oldKW, " ")
+			m.appendChat("System", fmt.Sprintf(
+				"💡 当前话题与之前[%s]不同, 如需新建会话可输入 /new",
+				oldLabel,
+			))
+		}
+		// 侧重点变化检测: 当前话题积累了足够消息后, 提示会话侧重点
+		if changed, focus := m.topicGraph.FocusChanged(2, &m.lastFocusID); changed && focus != "" {
+			m.appendChat("System", fmt.Sprintf("📌 会话侧重点: %s", focus))
+		}
+	}
 	// 对话还没标题时,用首条用户输入当标题(给 /sessions 列表显示)。
 	// 设了新标题就立刻把会话列表推给 web,否则浏览器一直显示"未命名",要切回来才更新。
 	if m.maybeSetConvTitle(input) {
