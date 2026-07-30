@@ -67,7 +67,7 @@ type modelT struct {
 // ProviderOptions 是配置时可选的模型供应商,顺序即 UI 展示顺序(第一个为默认)。
 // "custom" 为「其它」自定义:flash/pro 各自填 base_url/model/api_key/max_tokens/context_window,
 // 全部兼容 OpenAI 接口。预设供应商(deepseek/mimo)只需填 api_key,套用 modelConfig 默认。
-var ProviderOptions = []string{"deepseek", "mimo", "kimi", "qwen", "custom"}
+var ProviderOptions = []string{"deepseek", "mimo", "kimi", "qwen", "minimax", "custom"}
 
 // ProviderCustom 是「其它」自定义供应商的 id。
 const ProviderCustom = "custom"
@@ -102,15 +102,24 @@ var modelConfig = map[string]modelT{
 		URL:           "https://api.moonshot.cn/v1", // 必须带 /v1,端点为 /v1/chat/completions
 		FlashModel:    "kimi-k2.5",
 		ProModel:      "kimi-k2.6",
-		MaxTokens:     0, // 0 = 不发 max_tokens,走模型默认输出上限(见 agent.chatRequest omitempty)
+		MaxTokens:     0,      // 0 = 不发 max_tokens,走模型默认输出上限(见 agent.chatRequest omitempty)
 		ContextWindow: 262144, // 256K
 	},
 	"qwen": {
 		URL:           "https://dashscope.aliyuncs.com/compatible-mode/v1", // 阿里云北京;端点 /v1/chat/completions
 		FlashModel:    "qwen3.7-plus",
 		ProModel:      "qwen3.7-max",
-		MaxTokens:     0, // 0 = 不发 max_tokens,走模型默认输出上限
+		MaxTokens:     0,         // 0 = 不发 max_tokens,走模型默认输出上限
 		ContextWindow: 1_048_576, // 1M
+	},
+	"minimax": {
+		// 全球站 OpenAI 兼容端点,端点为 /v1/chat/completions(agent 追加 /chat/completions)。
+		// 中国站为 https://api.minimaxi.com/v1,高级用户可用 custom 供应商或直接改 model.yaml 切换。
+		URL:           "https://api.minimax.io/v1",
+		FlashModel:    "MiniMax-M2.7", // 入门:上下文 204800
+		ProModel:      "MiniMax-M3",   // 旗舰:上下文 1M,与下方 ContextWindow 对齐
+		MaxTokens:     0,              // 0 = 不发 max_tokens,走模型默认输出上限
+		ContextWindow: 1_000_000,      // 1M(MiniMax-M3)
 	},
 }
 

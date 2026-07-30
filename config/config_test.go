@@ -15,6 +15,7 @@ func TestDefaultForProviders(t *testing.T) {
 	}{
 		{"deepseek", "https://api.deepseek.com", "deepseek-v4-flash", "deepseek-v4-pro", 393216, 1_048_576},
 		{"mimo", "https://api.xiaomimimo.com/v1", "mimo-v2.5", "mimo-v2.5-pro", 131072, 1_048_576},
+		{"minimax", "https://api.minimax.io/v1", "MiniMax-M2.7", "MiniMax-M3", 0, 1_000_000},
 		{"unknown-provider", "https://api.deepseek.com", "deepseek-v4-flash", "deepseek-v4-pro", 393216, 1_048_576}, // 回退 deepseek
 	}
 	for _, c := range cases {
