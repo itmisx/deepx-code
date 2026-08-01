@@ -710,7 +710,7 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 		visionByModel:   visionByModel,
 		activeModelRole: role,
 		activeModelID:   activeID,
-		modelPin:        "auto",
+		modelPin:        defaultModel(),
 		version:         version,
 		mode:            agent.AgentMode_Auto,
 		workingMode:     agent.WorkingModeDefault, // 默认 kp;下方从 session 恢复
@@ -3848,6 +3848,11 @@ func (m *model) applyModelPin(arg string) {
 // flash/pro 且对应模型已配置 → 锁定并即时切右栏显示;否则回退 auto(右栏起手 flash,
 // flash 未配置则 pro)。供 initialModel 启动恢复与 loadCurrentConversation 切会话恢复共用。
 func (m *model) restoreModelPin(pin string) {
+	// 会话从未锁定过(空)→ 回退 meta.json 的 default_model 作为默认起手模型;
+	// 显式存过 auto/flash/pro 则按原样恢复 —— 用户的 /model 选择优先于全局默认。
+	if pin == "" {
+		pin = defaultModel()
+	}
 	switch {
 	case pin == tools.RoleFlash && m.models.Flash.Model != "":
 		m.modelPin = tools.RoleFlash

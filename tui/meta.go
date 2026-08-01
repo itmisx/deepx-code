@@ -29,6 +29,10 @@ type meta struct {
 	// ShowThinking 记忆是否把模型思考(reasoning_content)暗显进对话流(/thinking 切换)。默认关。
 	ShowThinking bool `json:"show_thinking,omitempty"`
 
+	// DefaultModel 默认起手模型("auto"/"flash"/"pro"),语义同 /model:auto=关键词路由,
+	// flash/pro=定死该模型。仅当会话从未用 /model 锁定过时生效;空 = auto(现有行为)。
+	DefaultModel string `json:"default_model,omitempty"`
+
 	// MousePassthrough 记忆鼠标穿透模式(F2 切换):开启后关掉鼠标捕获,由终端原生处理
 	// 文字选择与右键粘贴。需要它的用户(WSL2 / 习惯终端原生选择)是一直需要,故重启保持。
 	MousePassthrough bool `json:"mouse_passthrough,omitempty"`
@@ -56,6 +60,16 @@ func webHost() string {
 }
 
 func webPort() int { return metaGet().WebPort }
+
+// defaultModel 返回 meta.json 配置的默认起手模型(auto/flash/pro),空或非法回退 "auto"。
+// 语义与 /model 一致;只影响「会话从未锁定过模型」的初始起手,不覆盖用户的 /model 锁定。
+func defaultModel() string {
+	switch m := metaGet().DefaultModel; m {
+	case "flash", "pro":
+		return m
+	}
+	return "auto"
+}
 
 // modelCaps 是单个模型探测出的能力位,按维度独立存。
 type modelCaps struct {
