@@ -18,6 +18,16 @@ const (
 	PlanStatusBlocked PlanStatus = "blocked" // 依赖失败,跳过
 )
 
+// TodoType 规划项的职责分类:Action=要执行的动作;Verification/Review=验证/检查(不阻塞完成度门禁)。
+// 模型不声明该字段,由 parseTodoArgs 按标题启发式分类(见 classifyTodoType)。
+type TodoType int
+
+const (
+	TodoAction TodoType = iota
+	TodoVerification
+	TodoReview
+)
+
 // PlanItem 是 CreatePlan 产出的一个规划节点(顶层 DAG 节点)。
 type PlanItem struct {
 	ID        string   `json:"id"`
@@ -29,6 +39,13 @@ type PlanItem struct {
 	Status  PlanStatus `json:"-"`
 	Summary string     `json:"-"`
 	Phase   string     `json:"-"` // workflow 用:所属阶段名,渲染时据此分组(CreatePlan 留空 → 平铺)
+	// Type 规划项职责分类(完成度门禁用):只有 TodoAction 计入"阻塞性待办"
+	// (countBlockingTasks),Verification/Review 不阻塞 agent 结束。
+	Type TodoType `json:"-"`
+	// Progress 工具执行推进计数(完成度门禁用):只推进 TodoAction 型项,
+	// 每次 Write/Update 成功推进一次。Progress>0 表示"模型已在执行",gate 不再催
+	// (countBlockingTasks 只统计从未执行过的项,见 completionGate)。
+	Progress int `json:"-"`
 
 	// workflow 用:子 agent 计时(Go 侧计时,不入 journal、不影响 resume)。
 	StartedAt time.Time     `json:"-"` // 开跑时刻(start 时记)
@@ -108,9 +125,31 @@ func parseTodoArgs(rawArgs string) ([]PlanItem, error) {
 			ID:     fmt.Sprintf("todo%d", i+1),
 			Title:  title,
 			Status: normalizeTodoStatus(t.Status),
+			Type:   classifyTodoType(title),
 		}
 	}
 	return items, nil
+}
+
+// classifyTodoType 按标题启发式分类规划项职责:
+//   - 含验证/检查/确认/核对/verify/check/review/格式/文件数 等 → TodoVerification 或 TodoReview;
+//   - 其余 → TodoAction(执行动作,计入阻塞性待办)。
+//
+// 目的:非执行型待办(验证/检查/总结)不应阻塞 agent 结束 —— 完成度门禁只被
+// TodoAction 阻塞(见 countBlockingTasks),避免"模型写完文件还被'验证文件数'
+// 这类 todo 反复打断"。
+func classifyTodoType(title string) TodoType {
+	low := strings.ToLower(title)
+	for _, v := range []string{"验证", "检查", "确认", "核对", "校验", "verify", "check", "review", "格式", "文件数", "统计", "总结"} {
+		if strings.Contains(low, v) {
+			// 含"格式/检查/审阅"倾向 Review;其余(验证/校验/文件数)归 Verification。
+			if strings.Contains(low, "格式") || strings.Contains(low, "review") || strings.Contains(low, "检查") {
+				return TodoReview
+			}
+			return TodoVerification
+		}
+	}
+	return TodoAction
 }
 
 // normalizeTodoStatus 把 Todo 工具的状态词(TodoWrite 习惯用 pending/in_progress/completed)
