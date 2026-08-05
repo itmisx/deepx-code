@@ -139,6 +139,9 @@ type model struct {
 	//   - setupStep       = 0 选供应商 / 1 填配置(两步流程)
 	//   - setupCustomFields= 「其它」自定义的 10 个字段输入框(flash/pro 各 5);setupFieldIdx 为焦点
 	showSetup         bool
+	showDriftConfirm  bool   // 发送前偏离确认弹窗
+	pendingDriftInput string // 待确认的输入文本
+	driftConfirmed    bool   // 确认后跳过重复检测
 	setupRequired     bool
 	setupInput        textinput.Model
 	setupErr          string
@@ -253,6 +256,7 @@ type model struct {
 	// 0=flash.thinking, 1=flash.effort, 2=pro.thinking, 3=pro.effort。
 	// 每次 ←/→ 立刻写盘,所以无 draft / cancel 概念,Enter / Esc 都是关闭。
 	showReasoningModal bool
+	testMode           bool   // /test 测试模式: 输出请求前处理信息
 	reasoningModalRow  int
 
 	// inputDragging 表示左键在输入框区域按下后还没松开,用来实现"输入框拖拽选择片段":
@@ -302,6 +306,12 @@ type model struct {
 	// summary 是会话压缩摘要(内存态),每轮注入 system prompt 尾部(见 BuildSystemPrompt)。
 	// 不再作为 history[0] 消息存在;持久化在 state.json 的 summary 字段。
 	summary string
+
+	// topicGraph 是本地主题追踪图, 追踪对话主题的演化。
+	// 每轮 user 消息后自动更新, 供压缩时策略性选择保留内容(Phase 2)。
+	topicGraph *agent.TopicGraph
+	// lastFocusID 上一次焦点话题 ID, 用于 FocusChanged 检测。
+	lastFocusID int
 
 	// 重启缓存友好压缩:detectRestartCompaction 检测到前缀变化时暂存上次前缀快照,
 	// Init 时用 restartCompactionCmd 在首请求前跑一次压缩(见 prefix_cache.go)。
@@ -702,6 +712,40 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 	// 粘贴图片缓存:跟 OCR 解耦后改由这里按时效清理(超过 7 天的旧图删掉),不阻塞启动。
 	go tools.SweepPasteCache(7 * 24 * time.Hour)
 
+	// 加载分词器配置(~/.deepx/segmenter.yaml)。
+	// topic_tracking: true 时创建 TopicGraph 启用新路由。
+	segCfg, _ := config.LoadSegmenter()
+	var segmenter agent.Segmenter
+	var segErr error
+	var embedder agent.Embedder
+	if segCfg != nil && segCfg.TopicTracking {
+		// 创建分词器(中文词典, 用于 TF-IDF 回退)
+		segCacheDir, _ := config.SegmenterDir()
+		segmenter, segErr = agent.NewSegmenter("zh", segCacheDir)
+		// 创建嵌入器
+		if segCfg.Embedder != "" && segCfg.Embedder != "tfidf" {
+			// ONNX 延迟加载: 启动时用 TF-IDF, 后台加载 ONNX
+			embedder = agent.NewTFIDFEmbedder()
+		}
+	}
+	var topicGraph *agent.TopicGraph
+	if segmenter != nil {
+		topicGraph = agent.NewTopicGraph(segmenter, embedder)
+		// 后台加载 ONNX 模型, 就绪后通过 SetEmbedder 切换
+		if segCfg.Embedder != "" && segCfg.Embedder != "tfidf" {
+			embCacheDir, _ := config.SegmenterDir()
+			go func() {
+				onnxEmb, err := agent.NewEmbedder(agent.EmbedderType(segCfg.Embedder), embCacheDir, segCfg.ONNXModel)
+				if err == nil && onnxEmb != nil {
+					if topicGraph != nil {
+						topicGraph.SetEmbedder(onnxEmb)
+						topicGraph.ResetTopics()
+					}
+				}
+			}()
+		}
+	}
+
 	m := model{
 		mcpMgr:          mcpMgr,
 		mcpAddInput:     mi,
@@ -733,6 +777,7 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 		hub:             hub,
 		srv:             srv,
 		webURL:          webURL,
+		topicGraph:      topicGraph,
 		inputHistoryIndex: -1,
 	}
 
@@ -783,6 +828,10 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 			}
 			m.history = gobHistory
 			m.topic = lastTopicOf(gobHistory) // 冷启动恢复右栏主题(不额外存盘,从历史里读回)
+			// 从 gob 恢复的历史重建主题追踪图(用于路由, 独立于 LLM 主题检测)。
+			if m.topicGraph != nil {
+				m.topicGraph.Rebuild(gobHistory)
+			}
 			rebuildChatFromHistory(m.chatContent, gobHistory)
 			// 老对话(升级前就有 history、没 conv.json)首次进 /sessions 别显示"(未命名)":
 			// 用第一条用户消息回填标题。session 包自己解码不了 history.gob,放这儿做。
@@ -841,6 +890,11 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 				}
 			}
 
+			// 从 JSONL 兜底恢复的历史重建主题追踪图。
+			if m.topicGraph != nil && len(m.history) > 0 {
+				m.topicGraph.Rebuild(m.history)
+			}
+
 			// 声明当前模式,通知 LLM 当前状态。模式始终从 auto 起步(默认全工具)。
 			// 注意:gob 恢复时跳过此步骤 — 历史已包含之前的 mode notification,
 			// 重复追加会在每次重启时累积,污染 LLM 上下文。
@@ -864,6 +918,13 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 
 	// 每次启动的欢迎语。
 	m.appendChat("System", T("welcome"))
+
+	// 分词器状态提示:配置了 segmenter: zh 但启动失败时告知用户。
+	if segErr != nil {
+		m.appendChat("System", "⚠️ 分词器(zh)初始化失败: "+segErr.Error())
+	} else if segCfg != nil && segCfg.TopicTracking && segmenter == nil {
+		m.appendChat("System", "⚠️ 分词器未就绪, 请检查网络后重启")
+	}
 
 	// web 控制面板启用时,在 chat 区给出可点击 / 可复制的地址 —— 浏览器里能新建会话、
 	// 切会话、切权限/沙箱/工作模式,状态与终端实时对齐。
@@ -1145,6 +1206,20 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 	if input == "" && len(m.attachedImagePaths) == 0 {
 		return m, nil
 	}
+	// 发送前偏离检测: 会话已形成稳定关注点, 且当前输入与会话整体上下文语义差异过大时,
+	// 弹确认框让用户确认是否发送, 避免跑题内容浪费 token。
+	if m.topicGraph != nil && m.topicGraph.FocusEstablished() && !m.showDriftConfirm && !m.driftConfirmed {
+		sim := m.topicGraph.SimilarityToSession(input)
+		if sim < agent.DriftDetectThreshold {
+			m.showDriftConfirm = true
+			m.pendingDriftInput = input
+			m.appendChat("System", fmt.Sprintf(
+				"⚠️ 当前输入与会话主题[%s]偏差较大(相似度 %.0f%%), 确认发送吗? 按 Enter 确认, Esc 取消",
+				m.topicBadge(), sim*100,
+			))
+			return m, nil
+		}
+	}
 	// 流式中 / 压缩前台期间再提交(主要是 web 端在生成时点发送)→ 排队而非丢弃,本轮(或压缩)
 	// 结束后由 popQueuedInput 自动发出,与终端 Enter 完全一致:不开新 stream(杜绝并发两个 stream /
 	// 与压缩截断 history 的竞态)、不丢字。终端 Enter 已在键处理处排队;这里兜 web 等其它入口
@@ -1176,6 +1251,10 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 	userMsg := m.buildUserMessage(input)
 	m.appendChat("You", input)
 	m.history = append(m.history, userMsg)
+	// 本地主题追踪: 每轮 user 消息后更新主题图(仅分词器启用时)。
+	if m.topicGraph != nil {
+		m.topicGraph.TrackMessage(input, len(m.history)-1)
+	}
 	// 对话还没标题时,用首条用户输入当标题(给 /sessions 列表显示)。
 	// 设了新标题就立刻把会话列表推给 web,否则浏览器一直显示"未命名",要切回来才更新。
 	if m.maybeSetConvTitle(input) {
@@ -1201,15 +1280,108 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 
 	m.refreshViewport()
 
+	// 测试模式: 输出发送给 AI 前的处理信息
+	if m.testMode {
+		m.appendChat("System", fmt.Sprintf(
+			"🧪 **测试模式 - 请求前分析**\n\n"+
+				"**模型路由**: %s → %s\n"+
+				"**工作模式**: %s\n"+
+				"**会话摘要**: %s\n"+
+				"**历史消息数**: %d 轮\n"+
+				"**主题追踪**: %s\n"+
+				"**嵌入器**: %s\n"+
+				"**发送前偏离检测**: 相似度 %.0f%%, 阈值 %.0f%%, %s",
+			m.activeModelRole, m.activeModelID,
+			m.workingMode,
+			truncTitle(m.summary, 60),
+			len(m.history),
+			func() string {
+				if m.topicGraph == nil {
+					return "未启用"
+				}
+				cur := m.topicGraph.CurrentTopic()
+				if cur < 0 {
+					return "无主题"
+				}
+				// ONNX 模式下: 显示会话名称
+				if strings.HasPrefix(m.topicGraph.EmbedderName(), "onnx") {
+					if title := m.session.ConvTitle(); title != "" {
+						return truncTitle(title, 30)
+					}
+					return "语义追踪"
+				}
+				return m.topicGraph.SessionFocus()
+			}(),
+			func() string {
+				if m.topicGraph == nil {
+					return "无"
+				}
+				return m.topicGraph.EmbedderName()
+			}(),
+			func() float64 {
+				if m.topicGraph == nil {
+					return 100
+				}
+				return m.topicGraph.SimilarityToSession(input) * 100
+			}(),
+			agent.DriftDetectThreshold*100,
+			func() string {
+				if m.topicGraph == nil {
+					return "跳过"
+				}
+				sim := m.topicGraph.SimilarityToSession(input)
+				if sim < agent.DriftDetectThreshold {
+					return "⚠️ 偏离"
+				}
+				return "✅ 正常"
+			}(),
+		))
+	}
+
 	var cmds []tea.Cmd
 	cmds = append(cmds, m.spinner.Tick)
 
-	// 每次新用户消息开始,角色重置回 flash;agent 内部 keyword router 决定本轮真实模型。
-	m.activeModelRole = "flash"
-	m.activeModelID = m.models.Flash.Model
-	if m.activeModelID == "" {
-		m.activeModelRole = "pro"
-		m.activeModelID = m.models.Pro.Model
+	// 上下文感知路由: 结合关键词 + 会话上下文决定起手模型。
+	forceRole := ""
+	if m.modelPin == "" || m.modelPin == "auto" {
+		role := agent.RouteWithContext(input, m.topicGraph)
+		forceRole = role
+		m.activeModelRole = role
+		if role == "pro" {
+			m.activeModelID = m.models.Pro.Model
+		} else {
+			m.activeModelID = m.models.Flash.Model
+		}
+		if m.activeModelID == "" {
+			// 所选模型不可用, 回退另一个
+			if m.models.Pro.Model != "" {
+				m.activeModelRole = "pro"
+				m.activeModelID = m.models.Pro.Model
+			} else {
+				m.activeModelRole = "flash"
+				m.activeModelID = m.models.Flash.Model
+			}
+		}
+		// 记录本轮路由结果到 TopicGraph(供下一轮上下文延续)
+		if m.topicGraph != nil {
+			m.topicGraph.LastModelRole = m.activeModelRole
+		}
+	} else {
+		m.activeModelRole = m.modelPin
+		if m.modelPin == "pro" {
+			m.activeModelID = m.models.Pro.Model
+		} else {
+			m.activeModelID = m.models.Flash.Model
+		}
+		if m.activeModelID == "" {
+			if m.models.Pro.Model != "" {
+				m.activeModelRole = "pro"
+				m.activeModelID = m.models.Pro.Model
+			} else {
+				m.activeModelRole = "flash"
+				m.activeModelID = m.models.Flash.Model
+			}
+		}
 	}
 	// 上一轮的 plan 清空
 	m.plan = nil
@@ -1222,6 +1394,11 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 	models := m.models
 	models.Flash.Vision = m.visionByModel[modelCapKey(models.Flash)]
 	models.Pro.Vision = m.visionByModel[modelCapKey(models.Pro)]
+	// 有效路由: 用户锁定优先, 否则使用上下文感知路由
+	effectiveRole := forceRole
+	if m.modelPin != "" {
+		effectiveRole = m.modelPin
+	}
 	cmd, ch := agent.StartStream(
 		ctx,
 		models,
@@ -1230,7 +1407,7 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 		workspace,
 		m.skillCatalog,
 		m.summary,
-		m.modelPin,
+		effectiveRole,
 		m.workingMode,
 	)
 	m.streamCh = ch
@@ -1323,7 +1500,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case webCompactMsg:
 		// 浏览器点"压缩会话":等价于 /compact。
-		return m, m.startManualCompaction()
+		return m, m.startManualCompaction("")
 
 	case webMcpAddMsg:
 		// 浏览器添加 MCP server:落盘 + 后台连接,刷新工具集。
@@ -2375,6 +2552,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 			return m, nil
 		case "esc":
+			// 发送前偏离确认弹窗: Esc 取消发送
+			if m.showDriftConfirm {
+				m.showDriftConfirm = false
+				m.pendingDriftInput = ""
+				m.appendChat("System", "已取消发送, 可修改后重新提交")
+				return m, nil
+			}
 			// 正在拉 docker 镜像 → Esc 取消拉取,保持 native。
 			if m.dockerPulling {
 				if m.dockerPullCancel != nil {
@@ -2492,6 +2676,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "enter":
+			// 发送前偏离确认弹窗: Enter 确认发送
+			if m.showDriftConfirm {
+				m.showDriftConfirm = false
+				m.driftConfirmed = true
+				input := m.pendingDriftInput
+				m.pendingDriftInput = ""
+				m, cmd := m.submitUserInput(input)
+				m.driftConfirmed = false
+				return m, cmd
+			}
 			if m.streaming || m.compactingFG {
 				// 流式中 / 压缩中:不打断,把这条排队,本轮(或压缩)结束后自动发送
 				// (见 queuedInput / StreamDoneMsg / compressionResultMsg)。压缩期间排队同样杜绝
@@ -3003,7 +3197,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.compacting = true
 			m.compactingFG = true // 前台阻塞:同手动 /compact,footer 转 spinner + 期间挡输入。子 agent 走 runSubAgent 不经此处,天然例外。
 			// 前台阻塞 + spinner;排队输入推迟到 compressionResultMsg(压缩完成后)再发。
-			return m, tea.Batch(m.compactCmd(false), m.spinner.Tick)
+			return m, tea.Batch(m.compactCmd(false, ""), m.spinner.Tick)
 		}
 
 		// 影子热压:上下文跨过 shadowPoints(30/45/60%)某档时,后台预算一份 checkpoint+cut 存盘
@@ -3027,7 +3221,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.shadowDonePct = next
 				m.shadowing = true
 				shadowCmd = func() tea.Msg {
-					cp, cut, _, err := agent.RunCompression(lastSys, lastTools, snapshot, entry, ctxWin)
+					cp, cut, _, err := agent.RunCompression(lastSys, lastTools, snapshot, entry, ctxWin, "")
 					return shadowResultMsg{checkpoint: cp, cut: cut, gen: gen, err: err}
 				}
 			}
@@ -3506,6 +3700,10 @@ func (m *model) handleSlashCommand(input string) tea.Cmd {
 	if strings.HasPrefix(cmd, "/workflow") { // /workflows(列表) 或 /workflow <名字> [k=v…](保留原文大小写)
 		return m.handleWorkflowCommand(input)
 	}
+	if strings.HasPrefix(cmd, "/compact ") { // /compact <侧重点> → 按侧重点压缩
+		focus := strings.TrimSpace(strings.TrimPrefix(cmd, "/compact "))
+		return m.startManualCompaction(focus)
+	}
 	if strings.HasPrefix(cmd, "/provider") { // 裸 /provider 弹选择器,或 /provider <名字> 直切
 		return m.handleProviderCommand(cmd)
 	}
@@ -3536,6 +3734,13 @@ func (m *model) handleSlashCommand(input string) tea.Cmd {
 		m.openWebConfigModal()
 	case "/reasoning":
 		m.openReasoningModal()
+	case "/test":
+		m.testMode = !m.testMode
+		if m.testMode {
+			m.appendChat("System", "🧪 测试模式已开启, 下次请求前将输出处理信息")
+		} else {
+			m.appendChat("System", "测试模式已关闭")
+		}
 	case "/lang":
 		m.showLangModal = true
 		// 默认光标停在当前语言上
@@ -3544,7 +3749,7 @@ func (m *model) handleSlashCommand(input string) tea.Cmd {
 			m.langModalIdx = 1
 		}
 	case "/compact":
-		return m.startManualCompaction()
+		return m.startManualCompaction("")
 	case "/status":
 		m.toggleStatusPanel()
 	case "/thinking":
@@ -3948,7 +4153,7 @@ func lockedModelMsg(role string) string {
 // compactCmd 构造一次"压缩 history → checkpoint"的后台 Cmd —— 手动 /compact 与自动 80% 触发共用。
 // 拍 history 快照、复刻上次实际发送的 model/system/tools(命中热缓存);manual 供结果处理区分
 // (失败时是否提示用户)。调用方负责置 m.compacting/m.compactingFG 与启动 spinner。
-func (m model) compactCmd(manual bool) tea.Cmd {
+func (m model) compactCmd(manual bool, focusHint string) tea.Cmd {
 	ctxWin := m.models.Pro.ContextWindow
 	if ctxWin <= 0 {
 		ctxWin = 65536
@@ -3957,7 +4162,7 @@ func (m model) compactCmd(manual bool) tea.Cmd {
 	_, lastModel, lastSys, lastTools := m.session.LoadPrefixSnapshot()
 	entry := m.entryForModel(lastModel)
 	return func() tea.Msg {
-		summary, cutIdx, turns, err := agent.RunCompression(lastSys, lastTools, snapshot, entry, ctxWin)
+		summary, cutIdx, turns, err := agent.RunCompression(lastSys, lastTools, snapshot, entry, ctxWin, focusHint)
 		// 手动 /compact 压不动(轮数不足/历史太短)→ 退而回收工具输出,别让用户白按一次。
 		// reclaim 就地改 snapshot(不改条数),有回收就把结果带回,由 compressionResultMsg 应用。
 		// 只在 manual 时兜底:后台自动触发的压缩失败,轮内 reclaim 自会在流式循环里处理。
@@ -4058,11 +4263,9 @@ func compactDoneNote(auto bool, turns int) string {
 	return head + "（摘要已更新）"
 }
 
-// startManualCompaction 处理 /compact:手动触发会话压缩,按 agent.CompactKeepTokens 保留尾部。
-// 与自动 80% 触发(StreamDoneMsg 里)走同一套 compactCmd + compressionResultMsg 流程,
-// 区别只在于不看 token 阈值——用户敲了就压。压不动(历史太小)由 RunCompression 返回 err,
-// 经 manual 标记在结果处理处反馈给用户。
-func (m *model) startManualCompaction() tea.Cmd {
+// startManualCompaction 处理 /compact [focus]:手动触发会话压缩。
+// 可选参数 focus 指定压缩侧重点, 如 "/compact 重点保留缓存优化相关内容"。
+func (m *model) startManualCompaction(focus string) tea.Cmd {
 	if m.session == nil || m.models.Pro.Model == "" {
 		m.appendChat("System", "无可用会话或 Pro 模型,无法压缩")
 		return nil
@@ -4072,10 +4275,13 @@ func (m *model) startManualCompaction() tea.Cmd {
 		return nil
 	}
 	m.compacting = true
-	m.compactingFG = true // 前台阻塞:footer 转 spinner、期间挡输入(compressionResultMsg 里清)
-	m.appendChat("System", "正在压缩会话历史…")
-	// 启动 spinner tick,让 footer 的「压缩中…」动起来(TickMsg 处理处会在 compactingFG 时续 tick)。
-	return tea.Batch(m.compactCmd(true), m.spinner.Tick)
+	m.compactingFG = true
+	if focus != "" {
+		m.appendChat("System", fmt.Sprintf("正在按侧重点压缩会话历史: %s", focus))
+	} else {
+		m.appendChat("System", "正在压缩会话历史…")
+	}
+	return tea.Batch(m.compactCmd(true, focus), m.spinner.Tick)
 }
 
 // === Skill 辅助 ===

@@ -530,6 +530,9 @@ func (m model) statusFooterLine(_ int) string {
 			if m.turnToolCalls > 0 {
 				s += dim(" · " + strconv.Itoa(m.turnToolCalls) + " " + T("done.tools"))
 			}
+			if badge := m.topicBadge(); badge != "" {
+				s += dim(" · " + badge)
+			}
 			if m.mousePassthrough {
 				s += dim(" · " + T("mouse.passthrough.badge"))
 			}
@@ -539,6 +542,9 @@ func (m model) statusFooterLine(_ int) string {
 		// 这时 deepx 的选区/滚轮都不响应,不说明用户会以为界面坏了。
 		if m.mousePassthrough {
 			return dim(T("mouse.passthrough.badge"))
+		}
+		if badge := m.topicBadge(); badge != "" {
+			return dim(badge)
 		}
 		return ""
 	}
@@ -558,8 +564,26 @@ func (m model) statusFooterLine(_ int) string {
 	if m.mousePassthrough {
 		left += dim(" · " + T("mouse.passthrough.badge"))
 	}
+	if badge := m.topicBadge(); badge != "" {
+		left += dim(" · " + badge)
+	}
 	// 不再右贴 "Esc 中断" —— 输入框 placeholder(misc.input_placeholder)已含,避免重复。
 	return left
+}
+
+// topicBadge 返回当前主题标签, 无主题时返回空。
+func (m model) topicBadge() string {
+	if m.session == nil {
+		return ""
+	}
+	title := m.session.ConvTitle()
+	if title == "" {
+		return ""
+	}
+	if len([]rune(title)) > 20 {
+		title = string([]rune(title)[:20]) + "…"
+	}
+	return title
 }
 
 func statusIcon(s string) string {
@@ -854,6 +878,14 @@ func (m model) rightPanelView() string {
 		workspaceTitle += " " + subtle("("+m.session.SessionID()[:8]+")")
 	}
 	rows = append(rows, workspaceTitle, "  "+subtle(cwd), "")
+	if m.session != nil {
+		if title := m.session.ConvTitle(); title != "" {
+			if len([]rune(title)) > 30 {
+				title = string([]rune(title)[:30]) + "…"
+			}
+			rows = append(rows, "  "+subtle("📋 "+title))
+		}
+	}
 
 	// 模型厂商 section:api host(去 scheme / path),host 即可标识厂商。
 	endpoint := m.models.Flash.BaseURL

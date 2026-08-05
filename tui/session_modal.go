@@ -112,6 +112,17 @@ func (m *model) loadCurrentConversation() {
 			m.history = gobHistory
 			m.topic = lastTopicOf(gobHistory) // 右栏主题跟着切过去的会话恢复
 			rebuildChatFromHistory(m.chatContent, gobHistory)
+			// 切会话: 重建主题追踪图, 避免旧会话的 TF-IDF 文档频率污染新会话。
+			if m.topicGraph != nil {
+				m.topicGraph.Rebuild(gobHistory)
+				m.lastFocusID = -1
+			}
+		} else {
+			// 新会话无历史: 重置主题追踪图。
+			if m.topicGraph != nil {
+				m.topicGraph.Rebuild(nil)
+				m.lastFocusID = -1
+			}
 		}
 	}
 	m.refreshViewport()

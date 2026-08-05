@@ -137,6 +137,10 @@ var translations = map[string]map[Lang]string{
 		LangZH: "撤销上一轮对话(原输入回填输入框)",
 		LangEN: "Undo the last exchange (restores your input)",
 	},
+	"cmd.test.desc": {
+		LangZH: "开启/关闭测试模式(输出请求前处理信息)",
+		LangEN: "Toggle test mode (show pre-request processing info)",
+	},
 	"undo.done": {
 		LangZH: "↩ 已撤销上一轮对话,原输入已回填输入框",
 		LangEN: "↩ Undid the last exchange; your input is back in the box",

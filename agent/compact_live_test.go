@@ -62,7 +62,7 @@ func TestLive_RunCompressionSucceeds(t *testing.T) {
 	}
 	t.Logf("历史 ≈ %d tokens", EstimateHistoryTokens(hist))
 
-	summary, cutIdx, turns, err := RunCompression("", "", hist, entry, ctxWin)
+	summary, cutIdx, turns, err := RunCompression("", "", hist, entry, ctxWin, "")
 	if err != nil {
 		t.Fatalf("❌ 真实压缩失败(正常路径不该失败): %v", err)
 	}

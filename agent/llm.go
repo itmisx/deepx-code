@@ -733,7 +733,7 @@ func StartStream(
 				len(convo) > 0 && convo[0].Role == "system" {
 				hist := convo[1:]
 				ch <- CompactingMsg{} // 先亮状态行:下面这行最长会卡 10 分钟,期间不吐任何 token
-				sum, cutIdx, turns, cerr := RunCompression(convo[0].Content, MarshalToolSpecs(toolSpecs), hist, currentEntry, ctxWin)
+				sum, cutIdx, turns, cerr := RunCompression(convo[0].Content, MarshalToolSpecs(toolSpecs), hist, currentEntry, ctxWin, "")
 				if cerr != nil {
 					// 按失败类型分流:轮数不足是本轮结构性不可恢复(轮数恒定,重试注定再失败)→ 永久关,
 					// 不刷屏;瞬时失败(超时/网络)→ 冷却 compactRetryCooldown 圈后重试(见状态变量注释)。
