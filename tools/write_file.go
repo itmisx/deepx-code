@@ -9,11 +9,6 @@ import (
 	"strings"
 )
 
-// minPlaceholderCheckBytes:content 短于该字节数时才做占位符模式检测。
-// 正常的小文件(如几字节配置)很少短于 32 字节,误判率低;长内容即使含个别
-// 占位符字样也可能是真实文本,不拦(避免误伤)。
-const minPlaceholderCheckBytes = 32
-
 // placeholderPatterns:疑似「缺失值/占位标记」的文本模式(小写匹配)。
 // 命中说明模型很可能把元描述/占位符当 content 写入了(上下文污染),应拒绝并提示重写。
 // 注意:错误提示里刻意不回显这些具体字符串 —— 错误信息会进模型上下文,
@@ -26,7 +21,9 @@ var placeholderPatterns = []string{
 
 // validateWriteContent 写入前校验 content 是否为疑似占位符/缺失值文本:
 //   - 空内容 → 拒绝(写空文件请用其他方式,如 python 建空文件);
-//   - 内容过短且命中占位符模式 → 拒绝。
+//   - 命中占位符模式 → 拒绝(**不设长度门槛**):最该拦的折叠文本(如 "[已写入 ...]" 61~70
+//     字节)远超旧阈值 32 字节,长度门槛会把它放过去;模式表本身足够精确
+//     (<elided>/[已写入 不会出现在真实代码),去掉门槛不增加实际误伤。
 //
 // 错误提示只描述性质、给修正方向,不回显占位符文本。
 func validateWriteContent(content string) error {
@@ -35,14 +32,12 @@ func validateWriteContent(content string) error {
 			"若要创建空文件,请用 python -c \"open('目标路径','w').close()\"(Windows 无 touch)," +
 			"或提供真实内容")
 	}
-	if len(content) < minPlaceholderCheckBytes {
-		low := strings.ToLower(content)
-		for _, p := range placeholderPatterns {
-			if strings.Contains(low, p) {
-				return fmt.Errorf("Write 拒绝: content 疑似缺失值/占位标记,而非真实文件内容。" +
-					"这通常是上下文污染导致模型把元描述当内容输出。请重新提供完整的真实内容;" +
-					"若确需写入极短内容,请补充上下文或调整写法")
-			}
+	low := strings.ToLower(content)
+	for _, p := range placeholderPatterns {
+		if strings.Contains(low, p) {
+			return fmt.Errorf("Write 拒绝: content 疑似缺失值/占位标记,而非真实文件内容。" +
+				"这通常是上下文污染导致模型把元描述当内容输出。请重新提供完整的真实内容;" +
+				"若确需写入极短内容,请补充上下文或调整写法")
 		}
 	}
 	return nil

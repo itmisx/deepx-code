@@ -11,7 +11,7 @@ func TestValidateWriteContent_Valid(t *testing.T) {
 	cases := []string{
 		strings.Repeat("hello world\n", 10), // 正常长内容
 		"hello",                             // 极短但正常,不命中占位符
-		strings.Repeat("a", 100) + "marker" + strings.Repeat("b", 100), // 长内容即使含个别字样也放行
+		strings.Repeat("a", 100) + "marker" + strings.Repeat("b", 100), // 长内容含非占位符字样放行
 	}
 	for _, c := range cases {
 		if err := validateWriteContent(c); err != nil {
@@ -32,6 +32,11 @@ func TestValidateWriteContent_Rejected(t *testing.T) {
 		"[参数已折叠",
 		"content omitted",
 		"内容已省略",
+		// 长占位符(实测 61~70 字节)也必须拒 —— 去掉长度门槛后命中模式即拒,
+		// 不再因为"超 32 字节"而放行最该拦的折叠文本。
+		"[已写入 config.yaml,1247 字节/42 行;需要内容用 Read 查看]",
+		"[已写入 a.go,100 字节/5 行;需要内容用 Read 查看]",
+		"这是一个很长的描述:内容已省略,请用 Read 查看原文,这里写的是摘要信息",
 	}
 	for _, c := range cases {
 		if err := validateWriteContent(c); err == nil {
