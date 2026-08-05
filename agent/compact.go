@@ -250,7 +250,7 @@ func EstimatePromptTokens(workspace, skillCatalog, summary string, history []Cha
 // [lastSystemPrompt] + history[:keepStart] + [尾部压缩指令],并带上 lastToolSpecsJSON 还原的
 // 工具集 —— 这串前缀正是上次缓存下来的,几乎全命中,只有尾部指令是 miss。
 // lastSystemPrompt 为空(无快照)时退回冷路径:compressionPrompt 当 system + 拍平历史。
-func RunCompression(lastSystemPrompt, lastToolSpecsJSON string, history []ChatMessage, entry ModelEntry, ctxWin int) (
+func RunCompression(lastSystemPrompt, lastToolSpecsJSON string, history []ChatMessage, entry ModelEntry, ctxWin int, focusHint string) (
 	summary string, cutIdx int, compressedTurns int, err error) {
 
 	// 轮数按 isTurnBoundary(user 或 assistant)计:一个 user 消息 + 几十轮工具调用同样是几十轮对话,
@@ -332,17 +332,25 @@ func RunCompression(lastSystemPrompt, lastToolSpecsJSON string, history []ChatMe
 		convo := make([]ChatMessage, 0, keepStart+2)
 		convo = append(convo, ChatMessage{Role: "system", Content: lastSystemPrompt})
 		convo = append(convo, history[:keepStart]...)
-		convo = append(convo, ChatMessage{Role: "user", Content: warmCompressInstruction})
+		instruction := warmCompressInstruction
+		if focusHint != "" {
+			instruction = fmt.Sprintf("%s\n\n**压缩侧重点**: 请重点关注与[%s]相关的内容, 保留相关决策和上下文; 与侧重点无关的内容可以更激进地压缩。", instruction, focusHint)
+		}
+		convo = append(convo, ChatMessage{Role: "user", Content: instruction})
 		toolSpecs := UnmarshalToolSpecs(lastToolSpecsJSON)
 		summary, err = CallWithTools(ctx, entry.APIKey, entry.BaseURL, entry.Model, convo, toolSpecs, summaryMax)
 	} else {
 		// 冷路径:无快照,拍平历史走独立 system(必 miss,但正确)。
+		cp := compressionPrompt
+		if focusHint != "" {
+			cp = fmt.Sprintf("%s\n\n**压缩侧重点**: 请重点关注与[%s]相关的内容, 保留相关决策和上下文; 与侧重点无关的内容可以更激进地压缩。", cp, focusHint)
+		}
 		var inputBuf strings.Builder
 		for _, msg := range history[:keepStart] {
 			inputBuf.WriteString("[" + msg.Role + "]\n" + msg.Content + "\n\n")
 		}
 		convo := []ChatMessage{
-			{Role: "system", Content: compressionPrompt},
+			{Role: "system", Content: cp},
 			{Role: "user", Content: inputBuf.String()},
 		}
 		summary, err = CallOnce(ctx, entry.APIKey, entry.BaseURL, entry.Model, convo, summaryMax)

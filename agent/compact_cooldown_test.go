@@ -18,7 +18,7 @@ func TestRunCompression_TooFewTurnsSentinel(t *testing.T) {
 		{Role: "user", Content: "一"},
 		{Role: "assistant", Content: "回一"},
 	} // 2 轮(user + assistant),不多于要保留的 keepRecentTurns
-	_, _, _, err := RunCompression("", "", hist, ModelEntry{ContextWindow: 100000}, 100000)
+	_, _, _, err := RunCompression("", "", hist, ModelEntry{ContextWindow: 100000}, 100000, "")
 	if !errors.Is(err, ErrCompactTooFewTurns) {
 		t.Fatalf("2 轮应返回 ErrCompactTooFewTurns 哨兵, got %v", err)
 	}
@@ -34,7 +34,7 @@ func TestRunCompression_SingleUserLongTurnNotRejected(t *testing.T) {
 		hist = append(hist, asstCall(id, "Bash", `{"command":"go test"}`), toolMsg(id, "Bash", body))
 	}
 	// BaseURL 为空 → 摘要请求在本地就失败;这里只关心它已越过轮数 / 切点守卫。
-	_, _, _, err := RunCompression("sys", "[]", hist, ModelEntry{ContextWindow: 20000}, 20000)
+	_, _, _, err := RunCompression("sys", "[]", hist, ModelEntry{ContextWindow: 20000}, 20000, "")
 	if errors.Is(err, ErrCompactTooFewTurns) {
 		t.Fatal("单个 user 长任务轮不应再被判成轮数不足")
 	}

@@ -143,7 +143,7 @@ func (m *model) restartCompactionCmd() tea.Cmd {
 		ctxWin = 65536
 	}
 	return func() tea.Msg {
-		summary, cutIdx, compressedTurns, err := agent.RunCompression(oldSys, oldTools, snapshot, entry, ctxWin)
+		summary, cutIdx, compressedTurns, err := agent.RunCompression(oldSys, oldTools, snapshot, entry, ctxWin, "")
 		return compressionResultMsg{
 			summary:         summary,
 			cutIdx:          cutIdx,
