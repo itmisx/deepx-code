@@ -836,13 +836,27 @@ func StartStream(
 			}
 
 			// 把本轮 assistant 回复写入历史(含 reasoning_content,thinking 模型下轮需要)
-			// Write 的大 content 换成文件引用描述(文件已实际写入,历史留引用即可、需要时 Read),
-			// Update 原样保留(其 diff 语义 Read 补不回来)。详见 rewriteToolCallArgsForHistory。
+			// 大 content 的 Write 调用不进入 assistant tool_calls —— 渲染成独立的"执行记录"
+			// 消息(见下方执行循环),历史里只保留完整结构的 {path, content} 调用范式,
+			// 模型不会学到"缺 content / 带折叠标记"的伪 Write 形态。Update 原样保留
+			// (diff 语义 Read 补不回来)。
+			histToolCalls := rewriteToolCallArgsForHistory(toolCalls)
+			elidedIDs := make(map[string]bool) // 大 content Write(需外置)的 tool_call ID → 渲染执行记录
+			kept := histToolCalls[:0:0]
+			for _, tc := range histToolCalls {
+				if tc.Function.Name == "Write" {
+					if _, _, _, ok := elidedWriteInfo(tc.Function.Arguments); ok {
+						elidedIDs[tc.ID] = true
+						continue // 从 assistant tool_calls 移除,不呈现伪调用
+					}
+				}
+				kept = append(kept, tc)
+			}
 			convo = append(convo, ChatMessage{
 				Role:             "assistant",
 				Content:          assistantContent,
 				ReasoningContent: reasoning,
-				ToolCalls:        rewriteToolCallArgsForHistory(toolCalls),
+				ToolCalls:        kept,
 			})
 
 			if len(toolCalls) == 0 {
@@ -1113,6 +1127,25 @@ func StartStream(
 					Name:    tc.Function.Name,
 					Output:  result.Output,
 					Success: result.Success,
+				}
+				// 大 content Write 渲染为独立的"执行记录"消息(固定模板),
+				// 替代 tool 结果消息 —— 模型读到的是确定性的结果记录(路径/大小/行数),
+				// 不是被改写的伪 tool call,不会把 {path} / content_omitted 等形态学成
+				// Write 的标准写法。仅写入成功时渲染执行记录;失败时走普通 tool 消息,
+				// 让错误信息原样透传给模型(否则"状态: 成功"会掩盖失败,误导模型)。
+				if elidedIDs[tc.ID] {
+					if result.Success {
+						path, size, lines, _ := elidedWriteInfo(tc.Function.Arguments)
+						convo = append(convo, execRecordMessage(path, size, lines))
+					} else {
+						convo = append(convo, ChatMessage{
+							Role:       "tool",
+							ToolCallID: tc.ID,
+							Name:       tc.Function.Name,
+							Content:    clampTurnToolOutput(tc.Function.Name, result.Output, &turnToolBytes),
+						})
+					}
+					continue
 				}
 				convo = append(convo, ChatMessage{
 					Role:       "tool",
@@ -1777,59 +1810,65 @@ func runExecutorGuarded(t *tools.Tool, args map[string]any) tools.ToolResult {
 	}
 }
 
-// maxInlineWriteContentBytes 是 Write 的 content 存入历史时保留原文的字节上限。
-// 超过则把 content 整体替换为文件引用描述(文件已实际写入,历史留引用即可、需要时 Read 取回),
-// 而不是截断出一段片段 —— 既避免完整文件内容撑爆上下文,也免去"按字节切多字节字符切出半个字"的麻烦。
+// maxInlineWriteContentBytes 是 Write 的 content 不进入普通上下文的最大字节数。
+// 超过则把该 Write 调用从 assistant tool_calls 中移除、渲染成独立的"执行记录"消息
+// (见 execRecordMessage),content 本身不进入上下文 —— 既防膨胀,也避免"参数被改写"
+// 的形态污染模型(历史里永远不会出现缺 content / 带折叠标记的伪 tool call)。
 // 未超则原样保留:小内容占不了多少上下文,留着还能让模型看到自己刚写了什么。
+// 折叠判定与执行记录信息由 elidedWriteInfo 提供,模型读到的是"已写入 N bytes / M 行"
+// 的确定性元信息,无需 Read 验证。
 const maxInlineWriteContentBytes = 512
 
 // rewriteToolCallArgsForHistory 生成"存入历史用"的 toolCalls 副本:
-// 把 Write 的大 content 替换成文件引用描述,避免完整文件内容撑爆上下文。
-// Update 一律原样保留 —— 其 old_string/new_string 承载"把什么改成了什么"的 diff 语义,
-// 这信息不在文件里、Read 也补不回来,故不裁剪。
-// 只影响存入历史的版本,执行仍用原始 toolCalls,二者互不影响(ToolCall/ToolCallFunc 皆值类型)。
+// 只做 arguments 的 JSON 修复(空→{}、截断补全、垃圾兜底,见 args_repair.go);
+// 不再对 Write 折叠参数 —— 大 content 的 Write 调用会整体从 assistant
+// tool_calls 中移除,改由独立的"执行记录"消息呈现(见 streamAttempt 的组装逻辑),
+// 因此历史里**不会出现**缺 content / 带折叠标记的伪 tool call,模型学到的 Write
+// 范式始终是完整的 {path, content}。
+// Update 一律原样保留 —— 其 old_string/new_string 承载"把什么改成了什么"的 diff 语义。
 func rewriteToolCallArgsForHistory(tcs []ToolCall) []ToolCall {
 	out := make([]ToolCall, len(tcs))
 	for i, tc := range tcs {
 		out[i] = tc
-		// 入历史前把 arguments 修成合法 JSON(空→{}、截断补全、垃圾兜底包裹,见 args_repair.go):
-		// 历史里的坏 arguments 会让 vLLM 等严格后端对后续所有请求 400,会话不可恢复(issue #201)。
-		// 执行仍用原始 toolCalls,不受影响。
 		out[i].Function.Arguments = repairArgsJSON(out[i].Function.Arguments)
-		if tc.Function.Name == "Write" {
-			out[i].Function.Arguments = elideWriteContent(out[i].Function.Arguments)
-		}
 	}
 	return out
 }
 
-// elideWriteContent 若 Write 的 content 超过 maxInlineWriteContentBytes,
-// 把它替换为 "[已写入 <path>,N 字节/M 行;需要内容用 Read 查看]" 的引用描述并重新序列化;
-// content 够短、解析失败、或字段缺失都原样返回。
-// 重新编码用 json.Encoder + SetEscapeHTML(false),避免 path 里的 < > & 被转义成 < 等。
-func elideWriteContent(argsJSON string) string {
+// elidedWriteInfo 判断 Write 是否"大 content 需外置":content 超过 maxInlineWriteContentBytes 时
+// 返回 (path, size, lines, true),供调用方把该 Write 从 assistant tool_calls 中移除、
+// 并渲染成独立的执行记录消息(固定模板,prefix cache 友好);
+// 未超 / 解析失败 / 字段缺失返回 ok=false(按普通 tool_call 入历史)。
+//
+// 设计原则:content 不进普通上下文,由执行记录提供确定性元信息(大小/行数),模型无需 Read 验证;
+// 且历史里不再出现"缺 content / 带折叠标记"的伪 tool call —— 那是历史版本结构污染的根源
+// (模型会把任何"系统改写的参数形态"当成 Write 的标准写法模仿)。
+func elidedWriteInfo(argsJSON string) (path string, size, lines int, ok bool) {
 	if len(argsJSON) <= maxInlineWriteContentBytes {
-		return argsJSON // 整个 arguments 都没超,content 必然没超,免解析
+		return "", 0, 0, false
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return argsJSON
+		return "", 0, 0, false
 	}
-	content, ok := args["content"].(string)
-	if !ok || len(content) <= maxInlineWriteContentBytes {
-		return argsJSON
+	content, okc := args["content"].(string)
+	if !okc || len(content) <= maxInlineWriteContentBytes {
+		return "", 0, 0, false
 	}
-	path, _ := args["path"].(string)
-	lines := strings.Count(content, "\n") + 1
-	args["content"] = fmt.Sprintf("[已写入 %s,%d 字节/%d 行;需要内容用 Read 查看]", path, len(content), lines)
+	path, _ = args["path"].(string)
+	return path, len(content), strings.Count(content, "\n") + 1, true
+}
 
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(args); err != nil {
-		return argsJSON
+// execRecordMessage 生成大 Write 的"执行记录"消息(role=user,系统注入,固定模板)。
+// 固定文本只有 工具/状态 不变,变化的是 路径/大小/行数 —— prefix cache 友好;
+// 不给内容预览(预览会成为新的模仿源)。模型读到的是"结果记录"而非 tool call 参数,
+// 语义上不会与 Write 的调用范式混淆。
+func execRecordMessage(path string, size, lines int) ChatMessage {
+	return ChatMessage{
+		Role: "user",
+		Content: fmt.Sprintf("[Write 执行记录]\n工具: Write\n路径: %s\n状态: 成功\n大小: %d 字节\n行数: %d",
+			path, size, lines),
 	}
-	return strings.TrimRight(buf.String(), "\n") // Encode 会补一个换行,去掉
 }
 
 // --- 工具输出回收(reclaim,issue #201)---

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
 // mkTC 构造一个工具调用。
@@ -22,86 +21,76 @@ func argsMap(t *testing.T, argsJSON string) map[string]any {
 	return m
 }
 
-func TestElideWriteContent_LargeReplacedWithReference(t *testing.T) {
-	// 全中文大内容:老实现按字节切会切出半个 rune,这里应整体换成引用、不含乱码。
-	content := strings.Repeat("这是一段中文内容。", 200) // 远超 512 字节
-	in := mkTC("Write", `{"path":"a/b/中文.go","content":`+jsonStr(content)+`}`)
+// bigWriteArgs 构造一个 content 远超 512 字节的 Write 调用。
+func bigWriteArgs(path string) string {
+	return `{"path":"` + path + `","content":` + jsonStr(strings.Repeat("这是一段中文内容。", 200)) + `}`
+}
 
-	out := rewriteToolCallArgsForHistory([]ToolCall{in})
-	got := out[0].Function.Arguments
-
-	if !utf8.ValidString(got) {
-		t.Fatalf("结果含非法 UTF-8(切出了半个字符): %q", got)
+// 核心:大 content 的 Write 不再折叠参数,而是整体判定为"需外置" ——
+// 由调用方从 assistant tool_calls 移除并渲染成独立执行记录。elidedWriteInfo 是判定依据。
+func TestElidedWriteInfo_LargeContent(t *testing.T) {
+	in := mkTC("Write", bigWriteArgs("a/b/中文.go"))
+	path, size, lines, ok := elidedWriteInfo(in.Function.Arguments)
+	if !ok {
+		t.Fatalf("大 content 应判定为需外置")
 	}
-	m := argsMap(t, got)
-	gotContent, _ := m["content"].(string)
-	if strings.Contains(gotContent, "这是一段中文内容") == true && len(gotContent) > 200 {
-		t.Fatalf("大 content 应被换成引用而非保留原文, got=%q", gotContent)
+	if path != "a/b/中文.go" {
+		t.Fatalf("path 解析错误, got=%q", path)
 	}
-	if !strings.Contains(gotContent, "已写入") || !strings.Contains(gotContent, "Read") {
-		t.Fatalf("引用描述应含'已写入'和'Read'提示, got=%q", gotContent)
-	}
-	if !strings.Contains(gotContent, "a/b/中文.go") {
-		t.Fatalf("引用描述应含文件路径, got=%q", gotContent)
-	}
-	if p, _ := m["path"].(string); p != "a/b/中文.go" {
-		t.Fatalf("path 应保持不变, got=%q", p)
+	if size <= 512 || lines < 1 {
+		t.Fatalf("size/lines 应反映实际内容, size=%d lines=%d", size, lines)
 	}
 }
 
-func TestElideWriteContent_SmallKeptInline(t *testing.T) {
-	in := mkTC("Write", `{"path":"x.txt","content":"小内容"}`)
-	out := rewriteToolCallArgsForHistory([]ToolCall{in})
-	if out[0].Function.Arguments != in.Function.Arguments {
-		t.Fatalf("小 content 应原样保留\n want=%s\n got =%s", in.Function.Arguments, out[0].Function.Arguments)
+func TestElidedWriteInfo_NotElided(t *testing.T) {
+	cases := []string{
+		`{"path":"x","content":"小内容"}`,
+		"{broken" + strings.Repeat("x", 600),
+		`{"path":"x.go","command":"` + strings.Repeat("a", 600) + `"}`,
+	}
+	for _, c := range cases {
+		if _, _, _, ok := elidedWriteInfo(c); ok {
+			t.Fatalf("不应判定为需外置: %q", c)
+		}
 	}
 }
 
-func TestElideWriteContent_NoHTMLEscape(t *testing.T) {
-	// path 含 < > &,大 content 触发重编码;不应被转成 < 等。
-	content := strings.Repeat("x", 600)
-	in := mkTC("Write", `{"path":"a<b>&c.go","content":`+jsonStr(content)+`}`)
-	got := rewriteToolCallArgsForHistory([]ToolCall{in})[0].Function.Arguments
-	// 若 < > & 被 HTML 转义,原始 JSON 里 path 会变成 a<b>&c.go,
-	// 就不再包含字面子串 "a<b>&c.go"。含字面子串即证明未转义。
-	if !strings.Contains(got, "a<b>&c.go") {
-		t.Fatalf("< > & 不应被 HTML 转义(path 应保持字面量), got=%s", got)
+// 执行记录:固定模板,只含确定性元信息(路径/大小/行数),不含 content 预览
+// (预览会成为新的模仿源)。模型读到的是"结果记录",语义上不会与 Write 调用范式混淆。
+func TestExecRecordMessage_FixedTemplate(t *testing.T) {
+	msg := execRecordMessage("config.yaml", 1247, 42)
+	if msg.Role != "user" {
+		t.Fatalf("执行记录应为 user 消息(系统注入), got=%q", msg.Role)
 	}
-	if p, _ := argsMap(t, got)["path"].(string); p != "a<b>&c.go" {
-		t.Fatalf("path 应原样保留 < > &, got=%q", p)
+	for _, want := range []string{"Write 执行记录", "工具: Write", "config.yaml", "1247", "42", "状态: 成功"} {
+		if !strings.Contains(msg.Content, want) {
+			t.Fatalf("执行记录应含 %q, got=%q", want, msg.Content)
+		}
+	}
+	if strings.Contains(msg.Content, "content") || strings.Contains(msg.Content, "body") {
+		t.Fatalf("执行记录不应含内容预览, got=%q", msg.Content)
 	}
 }
 
-func TestUpdate_NeverTruncated(t *testing.T) {
-	// Update 即使 old_string/new_string 巨大也一律原样保留。
-	old := strings.Repeat("旧", 500)
-	nw := strings.Repeat("新", 500)
-	raw := `{"path":"f.go","old_string":` + jsonStr(old) + `,"new_string":` + jsonStr(nw) + `}`
-	in := mkTC("Update", raw)
+// rewriteToolCallArgsForHistory 现在只修 JSON,不再折叠任何参数 ——
+// 大 Write 的 content 原样保留(由调用方决定是否整体移除并渲染执行记录)。
+func TestRewrite_KeepsLargeWriteContent(t *testing.T) {
+	raw := bigWriteArgs("big.go")
+	in := mkTC("Write", raw)
 	out := rewriteToolCallArgsForHistory([]ToolCall{in})
 	if out[0].Function.Arguments != raw {
-		t.Fatalf("Update 应原样保留,不裁剪\n want=%s\n got =%s", raw, out[0].Function.Arguments)
+		t.Fatalf("不折叠参数:大 Write content 应原样保留\n want=%s\n got =%s", raw, out[0].Function.Arguments)
 	}
 }
 
-func TestOtherTools_Untouched(t *testing.T) {
-	in := mkTC("Bash", `{"command":"`+strings.Repeat("echo ", 300)+`"}`)
+func TestRewrite_RepairsBadJSON(t *testing.T) {
+	// 坏 arguments 仍应被修复为合法 JSON(issue #201 防严格后端 400)。
+	in := mkTC("Bash", `{"command":`)
 	out := rewriteToolCallArgsForHistory([]ToolCall{in})
-	if out[0].Function.Arguments != in.Function.Arguments {
-		t.Fatalf("非 Write 工具不应被改动")
-	}
-}
-
-func TestInvalidJSON_ReturnedAsIs(t *testing.T) {
-	// 超过阈值但不是合法 JSON:原样返回,不 panic。
-	broken := "{not json" + strings.Repeat("x", 600)
-	if got := elideWriteContent(broken); got != broken {
-		t.Fatalf("非法 JSON 应原样返回")
-	}
+	argsMap(t, out[0].Function.Arguments) // 合法 JSON 断言
 }
 
 func TestRewrite_DoesNotMutateOriginal(t *testing.T) {
-	// 执行仍用原始 toolCalls:确认原始未被改动。
 	content := strings.Repeat("y", 600)
 	raw := `{"path":"z.go","content":` + jsonStr(content) + `}`
 	orig := []ToolCall{mkTC("Write", raw)}
@@ -119,14 +108,22 @@ func TestRewrite_MixedBatch(t *testing.T) {
 		mkTC("Read", `{"path":"r.go"}`),
 	}
 	out := rewriteToolCallArgsForHistory(tcs)
-	if c, _ := argsMap(t, out[0].Function.Arguments)["content"].(string); !strings.Contains(c, "已写入") {
-		t.Fatalf("批次中的大 Write 应被换引用, got=%q", c)
+	for i := range out {
+		if out[i].Function.Arguments != tcs[i].Function.Arguments {
+			t.Fatalf("不折叠任何参数(仅修 JSON), 第 %d 个被改动:\n want=%s\n got =%s", i, tcs[i].Function.Arguments, out[i].Function.Arguments)
+		}
 	}
-	if out[1].Function.Arguments != tcs[1].Function.Arguments {
-		t.Fatalf("批次中的 Update 应原样")
-	}
-	if out[2].Function.Arguments != tcs[2].Function.Arguments {
-		t.Fatalf("批次中的 Read 应原样")
+}
+
+// 多轮连续 Write 大文件:每轮的 Write 都应被 elidedWriteInfo 识别为"需外置",
+// 调用方据此把它从 assistant tool_calls 移除 → 历史里不存在任何
+// "缺 content / 带折叠标记"的伪 Write,模型学到的 Write 范式始终完整。
+func TestMultiTurn_AllLargeWritesElided(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		in := mkTC("Write", `{"path":"f`+string(rune('a'+i))+`.txt","content":`+jsonStr(strings.Repeat("内容", 300))+`}`)
+		if _, _, _, ok := elidedWriteInfo(in.Function.Arguments); !ok {
+			t.Fatalf("第 %d 轮大 Write 应判定为需外置", i+1)
+		}
 	}
 }
 
