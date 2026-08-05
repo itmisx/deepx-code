@@ -1336,10 +1336,12 @@ func countBlockingTasks(todo []PlanItem) int {
 	return n
 }
 
-// advanceTodos 工具执行成功后,推进 TodoAction 型、含写类动作的 pending 项的 Progress。
-// 启发式:标题含写类动词(写/创建/生成/新建/write/create/generate)→ Write/Update 成功时推进。
-// 只处理 TodoAction 型(Verification/Review 不靠写文件推进,且不阻塞 gate);
-// 不做"推最后一个 pending"兜底 —— 那会为验证类 todo 制造假证据。
+// advanceTodos 工具执行成功后,推进所有未开始的 TodoAction 型项的 Progress。
+// 职责切分后,Verification/Review 已独立(不阻塞 gate、不靠写文件推进),所以
+// Write/Update 成功时**所有未开始的 Action 型项**都标记"已开始" —— 不依赖标题
+// 是否含"写"字:实测模型批次标题形如"批次1: settings/logging/..."(无"写"字),
+// 按标题启发式会匹配不到 → Write 成功不推进 → gate 反复催"执行型任务未开始",
+// 即使模型正在写文件。
 // Progress 只标记"模型已在该项上执行",真正完成仍需模型更新 Status=done。
 func advanceTodos(todo []PlanItem, tool string) int {
 	if tool != "Write" && tool != "Update" {
@@ -1349,19 +1351,13 @@ func advanceTodos(todo []PlanItem, tool string) int {
 	for i := range todo {
 		it := &todo[i]
 		if it.Type != TodoAction {
-			continue
+			continue // Verification/Review 不靠写文件推进,且不阻塞 gate
 		}
 		if it.Status != PlanStatusPending && it.Status != PlanStatusRunning {
 			continue
 		}
-		low := strings.ToLower(it.Title)
-		if strings.Contains(it.Title, "写") || strings.Contains(it.Title, "创建") ||
-			strings.Contains(it.Title, "生成") || strings.Contains(it.Title, "新建") ||
-			strings.Contains(low, "write") || strings.Contains(low, "create") ||
-			strings.Contains(low, "generate") {
-			it.Progress++
-			advanced++
-		}
+		it.Progress++
+		advanced++
 	}
 	return advanced
 }

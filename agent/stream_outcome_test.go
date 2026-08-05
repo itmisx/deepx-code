@@ -62,15 +62,16 @@ func TestCountBlockingTasks(t *testing.T) {
 	if got := countBlockingTasks(todo); got != 2 {
 		t.Fatalf("应统计 2 项阻塞待办(仅 Action 未开始), got %d", got)
 	}
-	// Write 成功推进 Action 型含写词的项("写 config.py" + "创建 models.py")。
-	if n := advanceTodos(todo, "Write"); n != 2 {
-		t.Fatalf("Write 应推进写类 Action 项, got %d", n)
+	// Write 成功推进所有未开始的 Action 型项(不依赖标题含写词:
+	// 实测批次标题如"批次1: settings/..."无写词,按标题会漏推进 → gate 误催)。
+	if n := advanceTodos(todo, "Write"); n != 3 {
+		t.Fatalf("Write 应推进全部 Action 项, got %d", n)
 	}
-	if todo[0].Progress != 1 || todo[1].Progress != 3 || todo[2].Progress != 0 || todo[3].Progress != 0 {
-		t.Fatalf("应只推进 Action 写类项, Verification/Review 不动, got %+v", todo[0:4])
+	if todo[0].Progress != 1 || todo[1].Progress != 3 || todo[2].Progress != 1 || todo[3].Progress != 0 || todo[4].Progress != 0 {
+		t.Fatalf("应推进 Action 项、Verification/Review 不动, got %+v", todo[0:5])
 	}
-	if got := countBlockingTasks(todo); got != 1 {
-		t.Fatalf("推进后应只剩'运行测试'阻塞, got %d", got)
+	if got := countBlockingTasks(todo); got != 0 {
+		t.Fatalf("推进后应无阻塞待办, got %d", got)
 	}
 	// Bash 不推进写类项。
 	if n := advanceTodos(todo, "Bash"); n != 0 {
