@@ -836,27 +836,28 @@ func StartStream(
 			}
 
 			// 把本轮 assistant 回复写入历史(含 reasoning_content,thinking 模型下轮需要)
-			// 大 content 的 Write 调用不进入 assistant tool_calls —— 渲染成独立的"执行记录"
-			// 消息(见下方执行循环),历史里只保留完整结构的 {path, content} 调用范式,
-			// 模型不会学到"缺 content / 带折叠标记"的伪 Write 形态。Update 原样保留
-			// (diff 语义 Read 补不回来)。
+			// 大 content 的 Write:assistant 先带完整 tool_calls 入 convo(参数经 repairArgsJSON,
+			// 保证配对完整、失败时错误能透传);工具循环后只把【成功】的大 Write 从中摘除并渲染
+			// 执行记录 —— 失败的大 Write 保留 tool_call,其 tool 错误消息正常配对。
+			// 这样:① 失败错误不再被吞(模型看得到"状态: 失败");② 成功的大 Write 最终历史
+			// 仍是"执行记录 + 无伪 tool call",防膨胀与防污染不变;③ 不产生悬挂 tool_call。
 			histToolCalls := rewriteToolCallArgsForHistory(toolCalls)
-			elidedIDs := make(map[string]bool) // 大 content Write(需外置)的 tool_call ID → 渲染执行记录
-			kept := histToolCalls[:0:0]
+			// elided:大 content Write 的判定结果缓存(问题 3:只算一次,避免组装用修复后 args、
+			// 执行用原始 args 两次判定不一致 → 空路径/0 字节记录)。
+			elided := make(map[string]elidedWrite)
 			for _, tc := range histToolCalls {
 				if tc.Function.Name == "Write" {
-					if _, _, _, ok := elidedWriteInfo(tc.Function.Arguments); ok {
-						elidedIDs[tc.ID] = true
-						continue // 从 assistant tool_calls 移除,不呈现伪调用
+					if p, s, l, ok := elidedWriteInfo(tc.Function.Arguments); ok {
+						elided[tc.ID] = elidedWrite{path: p, size: s, lines: l}
 					}
 				}
-				kept = append(kept, tc)
 			}
+			assistantIdx := len(convo)
 			convo = append(convo, ChatMessage{
 				Role:             "assistant",
 				Content:          assistantContent,
 				ReasoningContent: reasoning,
-				ToolCalls:        kept,
+				ToolCalls:        histToolCalls, // 先带全部(含大 Write),循环后摘除成功项
 			})
 
 			if len(toolCalls) == 0 {
@@ -893,6 +894,10 @@ func StartStream(
 			// 否则违反 OpenAI 协议(assistant 带 tool_calls 后必须紧跟 tool 响应,中间不能插
 			// user 消息,严格后端会 400:insufficient tool messages following tool_calls)。
 			var pendingExecRecords []ChatMessage
+			// successElidedIDs:本轮执行【成功】的大 Write tool_call ID —— 循环后从 assistant
+			// tool_calls 摘除(它们没有对应 tool 消息,不摘会留下悬挂 tool_call);
+			// 失败的大 Write 不在其中(保留 tool_call,错误消息正常配对)。
+			var successElidedIDs []string
 			for _, tc := range toolCalls {
 				// review 模式:对 Write/Update/Bash 发起审核。
 				// Workflow(run) 无论何种模式都强制确认:它会执行模型生成的脚本(进而派子 agent)。
@@ -1133,23 +1138,21 @@ func StartStream(
 					Output:  result.Output,
 					Success: result.Success,
 				}
-				// 大 content Write 渲染为独立的"执行记录"消息(固定模板),
-				// 替代 tool 结果消息 —— 模型读到的是确定性的结果记录(路径/大小/行数),
-				// 不是被改写的伪 tool call,不会把 {path} / content_omitted 等形态学成
-				// Write 的标准写法。成功/失败都进 pendingExecRecords(循环末尾统一追加,
-				// 见上方注释):不能即时插在 assistant 与 tool 之间(OpenAI 协议要求
-				// assistant 带 tool_calls 后必须紧跟 tool 响应,严格后端会 400),
-				// 也不能用带 tool_call_id 的 tool 消息(该 ID 已从 assistant tool_calls
-				// 移除,会产生孤儿 tool 消息 → 同样 400)。
-				if elidedIDs[tc.ID] {
+				// 大 content Write:
+				//   - 成功:渲染执行记录(用缓存的 elided 判定结果),进 pendingExecRecords,
+				//     该 tool_call 在循环后从 assistant 摘除(无对应 tool 消息,避免悬挂);
+				//   - 失败:保留 tool_call(assistant 已带),append tool 消息正常配对,
+				//     错误信息原样透传给模型 —— 不再被吞、不再伪装"状态: 成功"。
+				if ew, isElided := elided[tc.ID]; isElided {
 					if result.Success {
-						path, size, lines, _ := elidedWriteInfo(tc.Function.Arguments)
-						pendingExecRecords = append(pendingExecRecords, execRecordMessage(path, size, lines))
+						pendingExecRecords = append(pendingExecRecords, execRecordMessage(ew.path, ew.size, ew.lines))
+						successElidedIDs = append(successElidedIDs, tc.ID)
 					} else {
-						pendingExecRecords = append(pendingExecRecords, ChatMessage{
-							Role: "user",
-							Content: fmt.Sprintf("[Write 执行记录]\n工具: %s\n路径: %s\n状态: 失败\n说明: %s",
-								tc.Function.Name, toolArgPath(tc.Function.Arguments), result.Output),
+						convo = append(convo, ChatMessage{
+							Role:       "tool",
+							ToolCallID: tc.ID,
+							Name:       tc.Function.Name,
+							Content:    clampTurnToolOutput(tc.Function.Name, result.Output, &turnToolBytes),
 						})
 					}
 					continue
@@ -1162,6 +1165,17 @@ func StartStream(
 					// 防止一轮并发多条把上下文顶爆(issue #135)。只截入历史的内容,UI(上方 ToolCallResultMsg)仍展示完整结果。
 					Content: clampTurnToolOutput(tc.Function.Name, result.Output, &turnToolBytes),
 				})
+			}
+			// 摘除成功的大 Write tool_call(它们无对应 tool 消息,保留会悬挂;失败项保留配对)。
+			if len(successElidedIDs) > 0 {
+				kept := convo[assistantIdx].ToolCalls[:0:0]
+				for _, tc := range convo[assistantIdx].ToolCalls {
+					if containsID(successElidedIDs, tc.ID) {
+						continue
+					}
+					kept = append(kept, tc)
+				}
+				convo[assistantIdx].ToolCalls = kept
 			}
 			// 折叠 Write 的执行记录统一在所有 tool 消息之后追加(协议安全,见 pendingExecRecords 注释)。
 			convo = append(convo, pendingExecRecords...)
@@ -1852,6 +1866,9 @@ func rewriteToolCallArgsForHistory(tcs []ToolCall) []ToolCall {
 // 设计原则:content 不进普通上下文,由执行记录提供确定性元信息(大小/行数),模型无需 Read 验证;
 // 且历史里不再出现"缺 content / 带折叠标记"的伪 tool call —— 那是历史版本结构污染的根源
 // (模型会把任何"系统改写的参数形态"当成 Write 的标准写法模仿)。
+//
+// 注意:调用方应把结果缓存(见 elided map),避免组装(修复后 args)与执行循环(原始 args)
+// 各算一次导致判定不一致 → 空路径 / 0 字节的"成功"记录。
 func elidedWriteInfo(argsJSON string) (path string, size, lines int, ok bool) {
 	if len(argsJSON) <= maxInlineWriteContentBytes {
 		return "", 0, 0, false
@@ -1868,6 +1885,23 @@ func elidedWriteInfo(argsJSON string) (path string, size, lines int, ok bool) {
 	return path, len(content), strings.Count(content, "\n") + 1, true
 }
 
+// elidedWrite 是 elidedWriteInfo 的缓存结果,供组装/执行两处共用(只算一次)。
+type elidedWrite struct {
+	path  string
+	size  int
+	lines int
+}
+
+// containsID 判断 ID 是否在集合中。
+func containsID(ids []string, id string) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
 // execRecordMessage 生成大 Write 的"执行记录"消息(role=user,系统注入,固定模板)。
 // 固定文本只有 工具/状态 不变,变化的是 路径/大小/行数 —— prefix cache 友好;
 // 不给内容预览(预览会成为新的模仿源)。模型读到的是"结果记录"而非 tool call 参数,
@@ -1878,16 +1912,6 @@ func execRecordMessage(path string, size, lines int) ChatMessage {
 		Content: fmt.Sprintf("[Write 执行记录]\n工具: Write\n路径: %s\n状态: 成功\n大小: %d 字节\n行数: %d",
 			path, size, lines),
 	}
-}
-
-// toolArgPath 从工具调用参数中提取 path(供执行记录失败分支显示路径)。
-func toolArgPath(argsJSON string) string {
-	var args map[string]any
-	if json.Unmarshal([]byte(argsJSON), &args) != nil {
-		return ""
-	}
-	p, _ := args["path"].(string)
-	return p
 }
 
 // --- 工具输出回收(reclaim,issue #201)---
