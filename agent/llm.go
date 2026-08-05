@@ -849,14 +849,7 @@ func StartStream(
 			histToolCalls := rewriteToolCallArgsForHistory(toolCalls)
 			// elided:大 content Write 的判定结果缓存(问题 3:只算一次,避免组装用修复后 args、
 			// 执行用原始 args 两次判定不一致 → 空路径/0 字节记录)。
-			elided := make(map[string]elidedWrite)
-			for _, tc := range histToolCalls {
-				if tc.Function.Name == "Write" {
-					if p, s, l, ok := elidedWriteInfo(tc.Function.Arguments); ok {
-						elided[tc.ID] = elidedWrite{path: p, size: s, lines: l}
-					}
-				}
-			}
+			elided := collectElided(histToolCalls)
 			assistantIdx := len(convo)
 			convo = append(convo, ChatMessage{
 				Role:             "assistant",
@@ -1173,14 +1166,7 @@ func StartStream(
 			}
 			// 摘除成功的大 Write tool_call(它们无对应 tool 消息,保留会悬挂;失败项保留配对)。
 			if len(successElidedIDs) > 0 {
-				kept := convo[assistantIdx].ToolCalls[:0:0]
-				for _, tc := range convo[assistantIdx].ToolCalls {
-					if containsID(successElidedIDs, tc.ID) {
-						continue
-					}
-					kept = append(kept, tc)
-				}
-				convo[assistantIdx].ToolCalls = kept
+				convo[assistantIdx].ToolCalls = stripElidedToolCalls(convo[assistantIdx].ToolCalls, successElidedIDs)
 			}
 			// 折叠 Write 的执行记录统一在所有 tool 消息之后追加(协议安全,见 pendingExecRecords 注释)。
 			convo = append(convo, pendingExecRecords...)
@@ -1895,6 +1881,36 @@ type elidedWrite struct {
 	path  string
 	size  int
 	lines int
+}
+
+// collectElided 组装阶段:从(repairArgsJSON 修复后的)toolCalls 提取大 Write 的折叠判定缓存。
+// 组装与执行循环共用同一份结果,避免"修复后 args 判定 ok、原始 args 判定 !ok"的不一致
+// (问题 3:那会导致空路径/0 字节的"成功"执行记录)。
+func collectElided(tcs []ToolCall) map[string]elidedWrite {
+	elided := make(map[string]elidedWrite)
+	for _, tc := range tcs {
+		if tc.Function.Name == "Write" {
+			if p, s, l, ok := elidedWriteInfo(tc.Function.Arguments); ok {
+				elided[tc.ID] = elidedWrite{path: p, size: s, lines: l}
+			}
+		}
+	}
+	return elided
+}
+
+// stripElidedToolCalls 执行阶段:从 assistant tool_calls 中摘除【成功】折叠的 Write
+// (它们没有对应 tool 消息,保留会悬挂 tool_call → 严格后端 400);
+// 其余(失败的大 Write / Read / Update 等)保留 —— 失败 Write 的 tool 错误消息
+// 与保留的 tool_call 正常配对,错误透传给模型(问题 1/2)。
+func stripElidedToolCalls(tcs []ToolCall, successIDs []string) []ToolCall {
+	out := tcs[:0:0]
+	for _, tc := range tcs {
+		if containsID(successIDs, tc.ID) {
+			continue
+		}
+		out = append(out, tc)
+	}
+	return out
 }
 
 // containsID 判断 ID 是否在集合中。
