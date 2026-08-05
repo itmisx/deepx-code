@@ -12,6 +12,8 @@ func TestValidateWriteContent_Valid(t *testing.T) {
 		strings.Repeat("hello world\n", 10), // 正常长内容
 		"hello",                             // 极短但正常,不命中占位符
 		strings.Repeat("a", 100) + "marker" + strings.Repeat("b", 100), // 长内容含非占位符字样放行
+		"",       // 空内容放行(建空文件合法,__init__.py/.gitkeep)
+		"   \n ", // 纯空白也放行(不因 TrimSpace 拒绝)
 	}
 	for _, c := range cases {
 		if err := validateWriteContent(c); err != nil {
@@ -22,8 +24,6 @@ func TestValidateWriteContent_Valid(t *testing.T) {
 
 func TestValidateWriteContent_Rejected(t *testing.T) {
 	cases := []string{
-		"",
-		"   \n ",
 		"<elided>",
 		"<omitted>",
 		"<missing>",
@@ -57,14 +57,17 @@ func TestWriteFile_RejectsPlaceholder(t *testing.T) {
 	}
 }
 
-func TestValidateWriteContent_EmptyMessageMentionsPython(t *testing.T) {
-	// 空内容提示应引导 python 而非 touch(Windows 无 touch)。
-	err := validateWriteContent("")
-	if err == nil {
-		t.Fatalf("空内容应被拒绝")
+func TestWriteFile_AllowsEmptyContent(t *testing.T) {
+	// 空内容放行:建空文件(__init__.py/.gitkeep)是合法需求,plan 模式无 Bash 也能建。
+	dir := t.TempDir()
+	p := filepath.Join(dir, "__init__.py")
+	res := WriteFile(map[string]any{"path": p, "content": ""})
+	if !res.Success {
+		t.Fatalf("空内容应写入成功, got=%+v", res)
 	}
-	if !strings.Contains(err.Error(), "python") {
-		t.Fatalf("空内容提示应给出 python 建空文件方法, got=%q", err.Error())
+	b, err := os.ReadFile(p)
+	if err != nil || len(b) != 0 {
+		t.Fatalf("空文件应写入 0 字节, err=%v len=%d", err, len(b))
 	}
 }
 

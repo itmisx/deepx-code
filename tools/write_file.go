@@ -20,18 +20,14 @@ var placeholderPatterns = []string{
 }
 
 // validateWriteContent 写入前校验 content 是否为疑似占位符/缺失值文本:
-//   - 空内容 → 拒绝(写空文件请用其他方式,如 python 建空文件);
-//   - 命中占位符模式 → 拒绝(**不设长度门槛**):最该拦的折叠文本(如 "[已写入 ...]" 61~70
+//   - 命中占位符模式 → 拒绝(不设长度门槛):最该拦的折叠文本(如 "[已写入 ...]" 61~70
 //     字节)远超旧阈值 32 字节,长度门槛会把它放过去;模式表本身足够精确
-//     (<elided>/[已写入 不会出现在真实代码),去掉门槛不增加实际误伤。
+//     (<elided>/[已写入 不会出现在真实代码),去掉门槛不增加实际误伤;
+//   - 空内容 → 放行:建空文件(__init__.py/.gitkeep)是合法需求,plan 模式只读工具集
+//     无 Bash、建不了空文件 —— 拒绝空内容属于功能回退,启发式防护不值这个代价。
 //
 // 错误提示只描述性质、给修正方向,不回显占位符文本。
 func validateWriteContent(content string) error {
-	if strings.TrimSpace(content) == "" {
-		return fmt.Errorf("Write 拒绝: content 为空。Write 的 content 必须是完整文件内容;" +
-			"若要创建空文件,请用 python -c \"open('目标路径','w').close()\"(Windows 无 touch)," +
-			"或提供真实内容")
-	}
 	low := strings.ToLower(content)
 	for _, p := range placeholderPatterns {
 		if strings.Contains(low, p) {
