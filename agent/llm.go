@@ -888,6 +888,11 @@ func StartStream(
 			// pendingImageInjects:本轮被 redirect 的 OCR(视觉模型 + 真实外部图)对应的图片路径,
 			// 在 tc 循环收尾处统一追加成带图 user 消息,让模型下一轮直接看图(见 case "OCR",issue #194)。
 			var pendingImageInjects []string
+			// pendingExecRecords:本轮被外置(折叠)的大 Write 执行记录消息,统一在循环末尾
+			// (所有 tool 消息之后)追加 —— 不能即时插在 assistant 与 tool 消息之间,
+			// 否则违反 OpenAI 协议(assistant 带 tool_calls 后必须紧跟 tool 响应,中间不能插
+			// user 消息,严格后端会 400:insufficient tool messages following tool_calls)。
+			var pendingExecRecords []ChatMessage
 			for _, tc := range toolCalls {
 				// review 模式:对 Write/Update/Bash 发起审核。
 				// Workflow(run) 无论何种模式都强制确认:它会执行模型生成的脚本(进而派子 agent)。
@@ -1131,18 +1136,20 @@ func StartStream(
 				// 大 content Write 渲染为独立的"执行记录"消息(固定模板),
 				// 替代 tool 结果消息 —— 模型读到的是确定性的结果记录(路径/大小/行数),
 				// 不是被改写的伪 tool call,不会把 {path} / content_omitted 等形态学成
-				// Write 的标准写法。仅写入成功时渲染执行记录;失败时走普通 tool 消息,
-				// 让错误信息原样透传给模型(否则"状态: 成功"会掩盖失败,误导模型)。
+				// Write 的标准写法。成功/失败都进 pendingExecRecords(循环末尾统一追加,
+				// 见上方注释):不能即时插在 assistant 与 tool 之间(OpenAI 协议要求
+				// assistant 带 tool_calls 后必须紧跟 tool 响应,严格后端会 400),
+				// 也不能用带 tool_call_id 的 tool 消息(该 ID 已从 assistant tool_calls
+				// 移除,会产生孤儿 tool 消息 → 同样 400)。
 				if elidedIDs[tc.ID] {
 					if result.Success {
 						path, size, lines, _ := elidedWriteInfo(tc.Function.Arguments)
-						convo = append(convo, execRecordMessage(path, size, lines))
+						pendingExecRecords = append(pendingExecRecords, execRecordMessage(path, size, lines))
 					} else {
-						convo = append(convo, ChatMessage{
-							Role:       "tool",
-							ToolCallID: tc.ID,
-							Name:       tc.Function.Name,
-							Content:    clampTurnToolOutput(tc.Function.Name, result.Output, &turnToolBytes),
+						pendingExecRecords = append(pendingExecRecords, ChatMessage{
+							Role: "user",
+							Content: fmt.Sprintf("[Write 执行记录]\n工具: %s\n路径: %s\n状态: 失败\n说明: %s",
+								tc.Function.Name, toolArgPath(tc.Function.Arguments), result.Output),
 						})
 					}
 					continue
@@ -1156,6 +1163,8 @@ func StartStream(
 					Content: clampTurnToolOutput(tc.Function.Name, result.Output, &turnToolBytes),
 				})
 			}
+			// 折叠 Write 的执行记录统一在所有 tool 消息之后追加(协议安全,见 pendingExecRecords 注释)。
+			convo = append(convo, pendingExecRecords...)
 			// 视觉模型下被 redirect 的 OCR：把对应图片作为独立 user 消息追加进对话（带 ImagePaths，
 			// renderConvoImages 下一轮按当轮模型能力渲染成 base64 / 路径+OCR，切模型也安全）。
 			// 追加在所有 tool 结果之后，让模型下一轮直接看到内联的图（issue #194）。
@@ -1869,6 +1878,16 @@ func execRecordMessage(path string, size, lines int) ChatMessage {
 		Content: fmt.Sprintf("[Write 执行记录]\n工具: Write\n路径: %s\n状态: 成功\n大小: %d 字节\n行数: %d",
 			path, size, lines),
 	}
+}
+
+// toolArgPath 从工具调用参数中提取 path(供执行记录失败分支显示路径)。
+func toolArgPath(argsJSON string) string {
+	var args map[string]any
+	if json.Unmarshal([]byte(argsJSON), &args) != nil {
+		return ""
+	}
+	p, _ := args["path"].(string)
+	return p
 }
 
 // --- 工具输出回收(reclaim,issue #201)---
