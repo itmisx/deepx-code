@@ -209,6 +209,11 @@ type ChatMessage struct {
 	// 切换当前模式不会改写历史消息的后缀 → 历史逐字节稳定、前缀缓存不 miss。空值兜底为默认 kp。
 	// 同 ImagePaths 走"规范形态只存标签、发送那刻才渲染"的思路。gob 持久化(导出字段)。
 	WorkingMode WorkingMode `json:"-"`
+	// IsExecRecord 标记系统注入的"工具执行记录"消息(role=user 但非用户所说):
+	// 渲染(rebuildChatFromHistory)/轮数统计(isTurnBoundary)应跳过,避免:
+	// ① 用户气泡里冒出从没说过的话;② 每个大 Write 虚增对话轮、干扰压缩切点。
+	// 仅运行时字段,不进 JSON 序列化。
+	IsExecRecord bool `json:"-"`
 }
 
 // ContentPart 是 OpenAI 多模态消息里 content 数组的一个元素。
@@ -1908,9 +1913,9 @@ func containsID(ids []string, id string) bool {
 // 语义上不会与 Write 的调用范式混淆。
 func execRecordMessage(path string, size, lines int) ChatMessage {
 	return ChatMessage{
-		Role: "user",
-		Content: fmt.Sprintf("[Write 执行记录]\n工具: Write\n路径: %s\n状态: 成功\n大小: %d 字节\n行数: %d",
-			path, size, lines),
+		Role:         "user",
+		Content:      fmt.Sprintf("[Write 执行记录]\n工具: Write\n路径: %s\n状态: 成功\n大小: %d 字节\n行数: %d", path, size, lines),
+		IsExecRecord: true, // 系统注入,非用户所说:渲染/轮数统计应跳过
 	}
 }
 

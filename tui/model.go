@@ -3435,6 +3435,10 @@ func chatDisplayText(msg agent.ChatMessage) string {
 
 func rebuildChatFromHistory(cl *chatLog, history []agent.ChatMessage) {
 	for _, msg := range history {
+		// 系统注入的执行记录(role=user 但非用户所说)不渲染为用户气泡。
+		if msg.IsExecRecord {
+			continue
+		}
 		switch msg.Role {
 		case "user":
 			if t := chatDisplayText(msg); t != "" {

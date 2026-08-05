@@ -77,7 +77,15 @@ func CutHistory(history []ChatMessage, cutIdx int) []ChatMessage {
 //     只认 user 就找不到切点,压缩要么退到最前面(等于不压)、要么把整个长轮全保住;
 //   - tool 消息必须紧跟发起调用的 assistant,切在它上面会留下孤儿 tool → API 400
 //     (见 sanitizeToolPairs);而切在 assistant 上,它的 tool 结果自然跟着一起保留,配对不坏。
-func isTurnBoundary(m ChatMessage) bool { return m.Role == "user" || m.Role == "assistant" }
+// isTurnBoundary 判断消息是否为"对话轮边界"(user/assistant)。
+// 系统注入的执行记录(IsExecRecord)虽然 role=user,但不是真实对话轮 —— 不计为边界,
+// 否则每个大 Write 都虚增一轮、干扰压缩的轮数判断与切点。
+func isTurnBoundary(m ChatMessage) bool {
+	if m.IsExecRecord {
+		return false
+	}
+	return m.Role == "user" || m.Role == "assistant"
+}
 
 // compactionTimeout 是摘要 LLM 调用的硬超时。没有它,卡住的请求会让压缩锁永远占住、把所有压缩堵死。
 // 给得宽松(容纳大摘要生成 + 本地慢模型,如 4090D 上跑 qwen 摘要大历史,见 issue #201),
