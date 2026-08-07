@@ -65,7 +65,7 @@ func TestTrackMessageSameTopic(t *testing.T) {
 		t.Fatal("first message should create new topic")
 	}
 
-	idx2, isNew2 := tg.TrackMessage("把 context_window 也改大一些", 1)
+	idx2, isNew2 := tg.TrackMessage("把 max_tokens 配置再改大一些", 1)
 	if isNew2 {
 		t.Fatal("similar topic should not create new topic")
 	}
@@ -175,13 +175,13 @@ func TestCosineSimilarity(t *testing.T) {
 	a := map[string]float64{"hello": 1.0, "world": 0.5}
 	b := map[string]float64{"hello": 1.0, "world": 0.5}
 
-	sim := cosineSimilarity(a, b)
+	sim := CosineSimilarity(a, b)
 	if sim < 0.99 {
 		t.Errorf("identical vectors should have similarity ~1.0, got %f", sim)
 	}
 
 	c := map[string]float64{"foo": 1.0, "bar": 0.5}
-	sim2 := cosineSimilarity(a, c)
+	sim2 := CosineSimilarity(a, c)
 	if sim2 > 0.01 {
 		t.Errorf("disjoint vectors should have similarity ~0, got %f", sim2)
 	}

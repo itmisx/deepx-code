@@ -41,7 +41,8 @@ func (e *tfidfEmbedder) extractTFIDF(tokens []string) map[string]float64 {
 	for term, count := range tf {
 		tfVal := float64(count) / float64(len(tokens))
 		df := e.docFreq[term] + 1
-		idf := math.Log(float64(e.totalDocs+1) / float64(df))
+		// +2 平滑: 避免首篇文档中出现在所有文档的词的 IDF 为 0
+		idf := math.Log(float64(e.totalDocs+2) / float64(df))
 		vec[term] = tfVal * idf
 	}
 	return vec
@@ -83,4 +84,9 @@ func (e *tfidfEmbedder) TopKeywords(vec map[string]float64, n int) []string {
 		out[i] = pairs[i].k
 	}
 	return out
+}
+
+// NewTFIDFEmbedder 创建 TF-IDF 嵌入器(公开构造器)。
+func NewTFIDFEmbedder() *tfidfEmbedder {
+	return newTFIDFEmbedder()
 }

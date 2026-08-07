@@ -52,7 +52,7 @@ func RunExec(cfg agent.ModelConfig, prompt string) error {
 
 	// 固定 auto 模式;forceRole 传 "auto" → 走本地关键词路由(零 token 决定起手模型)。
 	// summary 空(一次性,无压缩)。
-	_, ch := agent.StartStream(ctx, cfg, history, agent.AgentMode_Auto, wd, skillCatalog, "", "auto", agent.WorkingModeDefault)
+	_, ch := agent.StartStream(ctx, cfg, history, agent.AgentMode_Auto, wd, skillCatalog, "", "auto", agent.WorkingModeDefault, "", "")
 
 	var streamErr error
 	for msg := range ch {

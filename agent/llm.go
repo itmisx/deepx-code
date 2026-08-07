@@ -113,6 +113,8 @@ type ModelSwitchMsg struct {
 	Role    string // "flash" or "pro"
 	ModelID string // 实际 model id
 	Reason  string // 可选,描述路由依据(目前为空,B 方案静默路由)
+	// CompressNow 建议立即压缩上下文(因上下文压力升级时设置)。
+	CompressNow bool
 }
 
 // HistoryUpdateMsg 让 UI 用最新的 history 替换本地副本(包含 assistant tool_calls / tool 结果)
@@ -602,6 +604,8 @@ func StartStream(
 	summary string, // 会话压缩摘要,垫在 system prompt 末尾;空串表示尚未压缩
 	forceRole string, // 用户锁定的模型角色("flash"/"pro");空串或 "auto" 表示走关键词路由
 	workingMode WorkingMode, // 工作模式:每轮把对应 skill 引导追加到最后一条 user 消息(renderWorkingMode)
+	reasoningEffort string, // 路由决策的推理深度(""/"medium"/"high");空时使用模型默认配置
+	thinking string, // 路由决策的 thinking 模式(""/"enabled"/"disabled");空时使用模型默认配置
 ) (tea.Cmd, <-chan tea.Msg) {
 	ch := make(chan tea.Msg, 128)
 
@@ -694,6 +698,7 @@ func StartStream(
 		lastPromptTokens := 0
 		inLoopCompactOff := false
 		compactCooldown := 0
+		forceCompaction := false // SwitchModel 因上下文压力升级时设为 true, 跳过阈值直接压缩
 
 		for {
 			// 检查 context 是否取消(ESC/退出),提前退出不卡后台
@@ -729,8 +734,9 @@ func StartStream(
 			// 对标 Claude Code:压缩 convo[1:] 成摘要、重建 [system(新摘要)]+尾部,新摘要经 CompactedMsg
 			// 回传 TUI 存 session(否则被剥的 system 摘要会丢失),history 截断经 HistoryUpdateMsg 同步。
 			if ctxWin := currentEntry.ContextWindow; !inLoopCompactOff && compactCooldown == 0 && ctxWin > 0 &&
-				lastPromptTokens >= CompactTriggerTokens(ctxWin) &&
+				(lastPromptTokens >= CompactTriggerTokens(ctxWin) || forceCompaction) &&
 				len(convo) > 0 && convo[0].Role == "system" {
+				forceCompaction = false // 重置
 				hist := convo[1:]
 				ch <- CompactingMsg{} // 先亮状态行:下面这行最长会卡 10 分钟,期间不吐任何 token
 				sum, cutIdx, turns, cerr := RunCompression(convo[0].Content, MarshalToolSpecs(toolSpecs), hist, currentEntry, ctxWin, "")
@@ -766,11 +772,24 @@ func StartStream(
 			// 渲染后的副本才是真正发出的输入 —— max_tokens 夹取按它估算(渲染会追加 OCR 文本等,
 			// 比规范 convo 大;按规范估会低估输入、夹不住,仍可能爆窗)。
 			rendered := renderConvoImages(renderWorkingMode(convo, workingMode), currentEntry.Vision)
+			// 路由决策的推理深度覆盖模型默认配置
+			effort := currentEntry.ReasoningEffort
+			if reasoningEffort != "" {
+				effort = reasoningEffort
+			}
+			// 路由决策的 thinking 模式覆盖模型默认配置
+			if thinking != "" {
+				currentEntry.Thinking = thinking
+			}
+			// 安全兜底: 使用 reasoning_effort 时强制关闭 thinking(两者冗余)
+			if effort != "" && currentEntry.Thinking != "disabled" {
+				currentEntry.Thinking = "disabled"
+			}
 			assistantContent, reasoning, toolCalls, finishReason, usage, err := streamOnce(
 				ctx,
 				currentEntry.APIKey, currentEntry.BaseURL, currentEntry.Model,
 				rendered, clampMaxTokens(currentEntry.MaxTokens, currentEntry.ContextWindow, rendered), toolSpecs,
-				currentEntry.ReasoningEffort, currentEntry.Thinking,
+				effort, currentEntry.Thinking,
 				ch,
 			)
 			// 自愈兜底:被端点以"不支持图片输入"拒掉(无论 base64 是探测误判发的、还是历史里混进来的)→
@@ -1047,7 +1066,10 @@ func StartStream(
 						role = tools.RolePro
 						currentEntry = models.Pro
 						// 工具表不随角色变(各角色一致),无需重算 toolSpecs。
-						ch <- ModelSwitchMsg{Role: role, ModelID: currentEntry.Model, Reason: reason}
+						ch <- ModelSwitchMsg{Role: role, ModelID: currentEntry.Model, Reason: reason, CompressNow: isContextPressure(reason)}
+						if isContextPressure(reason) {
+							forceCompaction = true
+						}
 						result = tools.ToolResult{
 							Output:  fmt.Sprintf("已切到 pro 模型 (%s)。本轮剩余请求 + reasoning 用 pro 处理。", currentEntry.Model),
 							Success: true,
@@ -1948,4 +1970,15 @@ func toolOutputReference(name, path string) string {
 		label += " " + path
 	}
 	return reclaimMarkerPrefix + label + " 的旧输出已省略以回收上下文,需要时请重新调用获取。"
+}
+
+// isContextPressure 判断 SwitchModel 升级理由是否因上下文压力。
+func isContextPressure(reason string) bool {
+	// 工具描述中 #10 明确说明: "上下文接近窗口限制,需要更大窗口模型"
+	// 模型可能用不同措辞, 关键特征: 提及窗口/上下文/容量已满
+	lower := strings.ToLower(reason)
+	return strings.Contains(lower, "窗口") ||
+		strings.Contains(lower, "上下文") ||
+		(strings.Contains(lower, "context") && strings.Contains(lower, "window")) ||
+		strings.Contains(lower, "70%")
 }

@@ -111,7 +111,7 @@ func (tg *TopicGraph) updateDocFreq(tokens []string) {
 // === 相似度 ===
 
 // cosineSimilarity 计算两个向量的余弦相似度。
-func cosineSimilarity(a, b map[string]float64) float64 {
+func CosineSimilarity(a, b map[string]float64) float64 {
 	if len(a) == 0 || len(b) == 0 {
 		return 0
 	}
@@ -174,7 +174,7 @@ func (tg *TopicGraph) TrackMessage(content string, msgIdx int) (topicIdx int, is
 	bestTopic := -1
 	bestScore := 0.0
 	for i := range tg.Topics {
-		score := cosineSimilarity(vec, tg.Topics[i].Vector)
+		score := CosineSimilarity(vec, tg.Topics[i].Vector)
 		if score > bestScore {
 			bestScore = score
 			bestTopic = i
@@ -365,7 +365,7 @@ func (tg *TopicGraph) TopicSwitched(minMsgs int) (switched bool, oldKW, newKW []
 	// 计算会话重心向量(全部话题的加权平均, 权重 = 消息数)
 	centroid := tg.sessionCentroid()
 	// 当前话题与重心向量的语义相似度
-	sim := cosineSimilarity(tg.Topics[cur].Vector, centroid)
+	sim := CosineSimilarity(tg.Topics[cur].Vector, centroid)
 	if sim >= topicExtensionSim {
 		return false, nil, nil // 主题扩展, 不提示
 	}
@@ -428,7 +428,7 @@ func (tg *TopicGraph) RelevanceTo(msgIdx int) float64 {
 		}
 		return 0
 	}
-	return cosineSimilarity(tg.Topics[cur].Vector, tg.Topics[target].Vector)
+	return CosineSimilarity(tg.Topics[cur].Vector, tg.Topics[target].Vector)
 }
 
 // SessionFocus 返回当前会话侧重点的摘要描述。
@@ -493,6 +493,11 @@ func (tg *TopicGraph) EmbedderName() string {
 	return "tfidf"
 }
 
+// Embedder 返回嵌入器实例(供外部包使用)。
+func (tg *TopicGraph) Embedder() Embedder {
+	return tg.embedder
+}
+
 // === 发送前偏离检测 ===
 
 // DriftDetectThreshold 是"发送前偏离检测"的相似度阈值。
@@ -523,5 +528,17 @@ func (tg *TopicGraph) SimilarityToSession(text string) float64 {
 	if len(centroid) == 0 {
 		return 1.0 // 无重心 → 允许任意输入
 	}
-	return cosineSimilarity(vec, centroid)
+	return CosineSimilarity(vec, centroid)
+}
+
+// SetEmbedder 替换嵌入器(用于 ONNX 延迟加载后就绪时切换)。
+func (tg *TopicGraph) SetEmbedder(emb Embedder) {
+	tg.embedder = emb
+}
+
+// ResetTopics 清除所有主题向量, 用于嵌入器切换后重新聚类。
+func (tg *TopicGraph) ResetTopics() {
+	for i := range tg.Topics {
+		tg.Topics[i].Vector = nil
+	}
 }

@@ -940,6 +940,10 @@ func (m model) rightPanelView() string {
 	rows = append(rows, section(T("panel.curmodel"), []string{
 		truncate(curModel, rightPanelWidth-4),
 	})...)
+	// 模型切换原因: 始终显示(空时跳过)
+	if m.lastModelSwitch != "" {
+		rows = append(rows, inlineRow("切换:", lipgloss.NewStyle().Foreground(highlightColor).Render(truncate(m.lastModelSwitch, rightPanelWidth-8))), "")
+	}
 	// 会话主题:模型每轮结尾自报(见 topic.go),按轮更新。摆在上下文用量上面 —— 这两项是
 	// 一起看的:主题告诉你"这段对话在讲什么",用量告诉你"它占了多少",主题变了而用量又高
 	// 就该 /new 了。还没识别到时用暗色占位,保持右栏行数稳定、不跳动。
