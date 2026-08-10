@@ -71,6 +71,20 @@ func (m *model) onPrefixSnapshot(msg agent.PrefixSnapshotMsg) {
 	m.session.SavePrefixSnapshot(sig, msg.Model, msg.SystemPrompt, msg.ToolSpecsJSON)
 }
 
+// compactCtxWin 返回压缩基准窗口 —— 所有"上下文占了多少"的判断都必须用它,包括:
+// 压缩触发线、影子压缩档位、以及右栏那个百分比的分母。
+//
+// 取 Pro 的窗口:压缩阈值是整个会话的全局属性,而 flash/pro 会在会话里来回切,
+// 按"当前活跃模型"取会让同一段历史在不同轮显示出不同的占用率。曾经右栏就是这么取的,
+// 结果 pro=512K / flash=128K 的配置下,压缩把上下文砍到 17% 后右栏仍显示 71%(issue #232)。
+// Pro 未配置时退 65536 —— 与既有各处的兜底值保持一致。
+func (m *model) compactCtxWin() int {
+	if w := m.models.Pro.ContextWindow; w > 0 {
+		return w
+	}
+	return 65536
+}
+
 // lastPromptTokens 返回"下一次请求 prompt 大约多大"的 token 数,用于压缩触发判断。
 // 优先用 API 上次返回的真实 prompt_tokens(精确);若没有(后端没返回 usage)则退回本地估算。
 func (m *model) lastPromptTokens() int {
@@ -116,10 +130,7 @@ func (m *model) detectRestartCompaction() bool {
 	if t, ok := m.session.PrefixSnapshotTime(); !ok || time.Since(t) > cacheWarmWindow {
 		return false
 	}
-	ctxWin := m.models.Pro.ContextWindow
-	if ctxWin <= 0 {
-		ctxWin = 65536
-	}
+	ctxWin := m.compactCtxWin()
 	// 只看历史 token(与保留口径一致),且要 ≥ 保留目标的 restartCompactKeepFactor 倍才值得压。
 	// 走 agent.CompactKeepTokens,与压缩实际保留的口径共用一份定义,避免两边百分比各自漂移。
 	keepTarget := agent.CompactKeepTokens(ctxWin)
@@ -138,10 +149,7 @@ func (m *model) restartCompactionCmd() tea.Cmd {
 	snapshot := append([]agent.ChatMessage(nil), m.history...)
 	oldSys, oldTools := m.pendingCompactSys, m.pendingCompactTools
 	entry := m.entryForModel(m.pendingCompactModel) // 用缓存那段历史的同一模型才命中
-	ctxWin := m.models.Pro.ContextWindow
-	if ctxWin <= 0 {
-		ctxWin = 65536
-	}
+	ctxWin := m.compactCtxWin()
 	return func() tea.Msg {
 		summary, cutIdx, compressedTurns, err := agent.RunCompression(oldSys, oldTools, snapshot, entry, ctxWin)
 		return compressionResultMsg{

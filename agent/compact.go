@@ -125,10 +125,36 @@ func CutHistory(history []ChatMessage, cutIdx int) []ChatMessage {
 //     (见 sanitizeToolPairs);而切在 assistant 上,它的 tool 结果自然跟着一起保留,配对不坏。
 func isTurnBoundary(m ChatMessage) bool { return m.Role == "user" || m.Role == "assistant" }
 
-// compactionTimeout 是摘要 LLM 调用的硬超时。没有它,卡住的请求会让压缩锁永远占住、把所有压缩堵死。
-// 给得宽松(容纳大摘要生成 + 本地慢模型,如 4090D 上跑 qwen 摘要大历史,见 issue #201),
-// 只为兜住"永不返回",超时即失败、下轮重试。
-const compactionTimeout = 10 * time.Minute
+// compactionTimeout 返回摘要 LLM 调用的硬超时,随上下文窗口放宽。
+// 没有它,卡住的请求会让压缩锁永远占住、把所有压缩堵死;只为兜住"永不返回",超时即失败、下轮重试。
+//
+// 为什么不能一律 10 分钟(issue #232):压缩要做的两件事都随窗口线性增长 ——
+// prefill 整段待压历史(512K 窗口在 70% 触发线上就是约 29 万 token),外加生成 summaryMax 的摘要。
+// 非流式(Stream: false)得等整个响应回来,512K 下光生成就要好几分钟,10 分钟必然不够 ——
+// 表现为大窗口用户一到 70% 就 "context deadline exceeded",小窗口用户毫无感觉。
+// 给得宽松些无妨:它只是"永不返回"的兜底,正常压缩远早于此返回。
+func compactionTimeout(ctxWin int) time.Duration {
+	if ctxWin <= 0 {
+		return baseCompactionTimeout
+	}
+	d := baseCompactionTimeout + time.Duration(ctxWin/(64<<10))*perChunkCompactionTimeout
+	return min(d, maxCompactionTimeout)
+}
+
+const (
+	baseCompactionTimeout     = 10 * time.Minute // 起步(小窗口绰绰有余,保持原有行为)
+	perChunkCompactionTimeout = 3 * time.Minute  // 每 64K 窗口追加(主要覆盖 prefill 变长)
+	// maxCompactionTimeout:封顶。压缩是**前台阻塞**的(compactingFG,期间挡输入),
+	// 真让它挂到一小时用户就废了。摘要长度封顶后"生成慢"这个主因已经消除,剩下只有 prefill,
+	// 30 分钟对本地慢模型跑满窗口也够,再长就该判定为病态、失败重试而不是继续等。
+	maxCompactionTimeout = 30 * time.Minute
+)
+
+// maxSummaryTokens 是摘要生成的绝对上限。
+// 摘要是"当前工作状态快照",信息量由会话内容决定,不该随窗口线性膨胀:
+// 512K 窗口下 ctxWin*3% = 15728 tok,既拖慢生成(压缩超时的主因之一),
+// 又让压缩后的上下文一上来就被摘要占掉一大块。4000 tok 足够装下这套模板的全部字段。
+const maxSummaryTokens = 4000
 
 // compressionPrompt 是冷路径(无前缀快照)压缩历史时发给 LLM 的 system prompt。
 const compressionPrompt = `你是会话「工作状态 checkpoint」生成器。把对话历史提炼成一份结构化的当前工作状态快照,用于丢弃旧历史后延续上下文。
@@ -361,10 +387,11 @@ func RunCompression(lastSystemPrompt, lastToolSpecsJSON string, history []ChatMe
 	}
 	compressedTurns = compressedUserCount
 
-	summaryMax := max(ctxWin*3/100, 256) // 下限 256 tok,避免太小失去摘要意义
+	// 下限 256 tok(太小就失去摘要意义),上限 maxSummaryTokens(摘要不随窗口线性膨胀)。
+	summaryMax := min(max(ctxWin*3/100, 256), maxSummaryTokens)
 
-	// 硬超时:卡住的摘要请求不会永久占住压缩锁(否则压缩全堵死)。
-	ctx, cancel := context.WithTimeout(context.Background(), compactionTimeout)
+	// 硬超时:卡住的摘要请求不会永久占住压缩锁(否则压缩全堵死)。随窗口放宽,见 compactionTimeout。
+	ctx, cancel := context.WithTimeout(context.Background(), compactionTimeout(ctxWin))
 	defer cancel()
 
 	if lastSystemPrompt != "" {

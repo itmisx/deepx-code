@@ -917,12 +917,14 @@ func (m model) rightPanelView() string {
 	}
 	rows = append(rows, section("🏷 "+T("panel.topic"), []string{topicVal})...)
 	// 用量紧跟模型。首轮 API 调用结束才能拿到 lastUsage,没拿到前用 "—" 占位,保持布局一致。
-	// 上下文占用:本轮发出的 prompt tokens / 当前模型窗口。窗口从当前模型配置动态取(非硬编码);
-	// 未配置(=0)则只显示已用 token,不编造分母/百分比。
-	ctxWin := m.models.Flash.ContextWindow
-	if m.activeModelRole == "pro" {
-		ctxWin = m.models.Pro.ContextWindow
-	}
+	// 上下文占用:本轮发出的 prompt tokens / 压缩基准窗口。未配置(=0)则只显示已用 token,
+	// 不编造分母/百分比。
+	//
+	// 分母必须与压缩用的窗口一致(compactCtxWin)。曾经按"当前活跃模型"取窗口,而压缩一律按 Pro 算 ——
+	// 两边窗口配得不一样时(如 pro=512K / flash=128K),压缩明明把上下文砍到 17% 了,右栏却因为
+	// 分母换成 flash 的 128K 而显示 71%,看起来像"压了没动",要等下一轮切回 pro 才跳变(issue #232)。
+	// 这个数字的意义本来就是"离压缩触发线还有多远",分母自然该是压缩的基准。
+	ctxWin := m.compactCtxWin()
 	usedStr, outputStr, cacheStr := "—", "—", "—"
 	if u := m.lastUsage; u != nil {
 		if ctxWin > 0 && u.PromptTokens > 0 {
