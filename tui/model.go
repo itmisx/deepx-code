@@ -2800,6 +2800,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.compactingInTurn = true
 		return m, agent.ListenToStream(m.streamCh)
 
+	case agent.OutputBudgetLowMsg:
+		// 上下文把输出预算挤没了:模型这轮很可能刚开口就停。夹取本身是静默的,
+		// 不出这一声,用户只看到"莫名其妙停下来、工具怎么调都失败"(issue #232)。
+		if m.streamCh == nil {
+			return m, nil
+		}
+		note := fmt.Sprintf("上下文已接近窗口上限,本轮可用输出仅剩约 %s tok —— 模型可能刚开口就停。"+
+			"建议 /compact 手动压缩,或 /new 开一段新对话。", formatTokenCount(msg.Available))
+		m.chatContent.Open(kindSystem, "**输出预算告急**:"+note)
+		m.refreshViewport()
+		m.broadcast(web.Event{Kind: "notice", Text: "输出预算告急:" + note})
+		return m, nil
+
 	case agent.CompactFailedMsg:
 		if m.streamCh == nil {
 			return m, nil
@@ -2970,10 +2983,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if tail := strings.TrimRight(m.topicF.flush(), " \t\r\n"); tail != "" {
 			m.chatContent.Append(tail)
 		}
-		ctxWin := m.models.Pro.ContextWindow
-		if ctxWin <= 0 {
-			ctxWin = 65536
-		}
+		ctxWin := m.compactCtxWin()
 		m.applyTurnTopic(ctxWin)
 
 		m.status = "idle"
@@ -3142,9 +3152,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// 兜底:cutIdx 基于触发时的快照算;若期间 history 已被(另一次压缩/新消息)改动到
-		// 比 cutIdx 短,直接丢弃这个过期结果,避免切片越界 panic。
+		// 兜底:cutIdx 基于触发时的快照算;若期间 history 已被(另一次压缩/新消息/undo/切会话)
+		// 改动到比 cutIdx 短,直接丢弃这个过期结果,避免切片越界 panic。
+		//
+		// 手动 /compact 走到这里必须出声:用户刚敲了命令、看着 spinner 转完,历史和右栏的占用
+		// 却纹丝不动 —— 静默丢弃与"压缩没生效"从表现上完全无法区分,只能干瞪眼(issue #232)。
+		// 自动触发仍保持静默(下次触发会重试,不打扰用户)。
 		if msg.cutIdx < 0 || msg.cutIdx > len(m.history) {
+			if msg.manual {
+				const note = "压缩结果已过期(期间历史被改动),本次跳过 —— 可再敲一次 /compact"
+				m.chatContent.Open(kindSystem, "**"+note+"**")
+				m.refreshViewport()
+				m.broadcast(web.Event{Kind: "notice", Text: note})
+			}
 			if next, qcmd, ok := m.popQueuedInput(); ok {
 				return next, qcmd
 			}
@@ -3943,10 +3963,7 @@ func lockedModelMsg(role string) string {
 // 拍 history 快照、复刻上次实际发送的 model/system/tools(命中热缓存);manual 供结果处理区分
 // (失败时是否提示用户)。调用方负责置 m.compacting/m.compactingFG 与启动 spinner。
 func (m model) compactCmd(manual bool) tea.Cmd {
-	ctxWin := m.models.Pro.ContextWindow
-	if ctxWin <= 0 {
-		ctxWin = 65536
-	}
+	ctxWin := m.compactCtxWin()
 	snapshot := append([]agent.ChatMessage(nil), m.history...)
 	_, lastModel, lastSys, lastTools := m.session.LoadPrefixSnapshot()
 	entry := m.entryForModel(lastModel)
@@ -4406,14 +4423,18 @@ func (m *model) refreshViewport() {
 }
 
 // pushInputHistory 将一条已发送的消息加入输入历史。
-// 去重：与上一条相同则跳过；上限 100 条防止内存无限增长。
+// 去重：与上一条相同则不重复入列；上限 100 条防止内存无限增长。
+//
+// 无论是否入列,都必须退出翻阅态 —— 发送即"这一轮输入结束",下次 ↑ 该从最新一条重新开始。
+// 这里曾经在去重分支直接 return,把 inputHistoryIndex 留在上次翻阅的下标上:用户按 ↑ 调出
+// 一条旧消息、直接回车重发(与上一条相同 → 命中去重),下次再按 ↑ 就从那个下标继续往前减,
+// 表现为"最新那条被吃掉了",而且只在重发时出现,所以显得时有时无(issue #232)。
 func (m *model) pushInputHistory(text string) {
-	if len(m.inputHistory) > 0 && m.inputHistory[len(m.inputHistory)-1] == text {
-		return
-	}
-	m.inputHistory = append(m.inputHistory, text)
-	if len(m.inputHistory) > 100 {
-		m.inputHistory = m.inputHistory[len(m.inputHistory)-100:]
+	if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != text {
+		m.inputHistory = append(m.inputHistory, text)
+		if len(m.inputHistory) > 100 {
+			m.inputHistory = m.inputHistory[len(m.inputHistory)-100:]
+		}
 	}
 	m.inputHistoryIndex = -1
 	m.inputDraft = ""

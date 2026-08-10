@@ -159,6 +159,15 @@ type CompactFailedMsg struct {
 	Retrying bool
 }
 
+// OutputBudgetLowMsg:输入把本轮可用输出预算挤到不足以完成一次正常回复时发一次。
+//
+// 这是压缩没能把上下文降下来的下游症状:clampMaxTokens 会把 max_tokens 一路夹到 1,
+// 模型只能吐一个 token 就结束 —— 用户看到的是"一执行就自己停下来、工具怎么调都失败",
+// 而夹取全程静默,没有任何线索指向真因(issue #232)。每轮最多发一次,不刷屏。
+type OutputBudgetLowMsg struct {
+	Available int // 夹取后实际能用的 max_tokens
+}
+
 // ContextReclaimedMsg 工具输出回收(reclaim)落地后发给 UI。reclaim 是长任务(user 轮≤2、压缩
 // 结构上不触发)里**唯一**在减负的一层,可它此前只发 HistoryUpdateMsg —— 不刷状态栏、不留痕迹、
 // 不广播,把上下文从 100% 压到 20% 用户却什么都看不到,以为"没压成功"(issue #201)。
@@ -676,6 +685,7 @@ func StartStream(
 		// gateNudges = 连续被门禁挡回的次数(死循环保护,见 completionGate)。
 		var lastTodo []PlanItem
 		gateNudges := 0
+		budgetWarned := false // 输出预算告急提示每轮只发一次(见 OutputBudgetLowMsg)
 
 		// lastFile = 本轮最近操作的文件路径,给 Update 漏 path 时兜底回填(issue #81)。
 		var lastFile string
@@ -766,6 +776,14 @@ func StartStream(
 			// 渲染后的副本才是真正发出的输入 —— max_tokens 夹取按它估算(渲染会追加 OCR 文本等,
 			// 比规范 convo 大;按规范估会低估输入、夹不住,仍可能爆窗)。
 			rendered := renderConvoImages(renderWorkingMode(convo, workingMode), currentEntry.Vision)
+			// 输入把输出预算挤没了:再发也只能吐几个 token 就停,表现为"一执行就自己停下来、
+			// 工具怎么调都失败"。这是压缩没能把上下文降下来的下游症状,而夹取本身是静默的 ——
+			// 出声一次,把症状和真因接上,别让用户对着"莫名其妙停住"干瞪眼(issue #232)。
+			if avail := clampMaxTokens(currentEntry.MaxTokens, currentEntry.ContextWindow, rendered); !budgetWarned &&
+				currentEntry.MaxTokens > 0 && currentEntry.ContextWindow > 0 && avail < minUsefulOutputTokens {
+				budgetWarned = true
+				ch <- OutputBudgetLowMsg{Available: avail}
+			}
 			assistantContent, reasoning, toolCalls, finishReason, usage, err := streamOnce(
 				ctx,
 				currentEntry.APIKey, currentEntry.BaseURL, currentEntry.Model,
@@ -1259,6 +1277,11 @@ func clampMaxTokens(maxTokens, ctxWin int, convo []ChatMessage) int {
 	}
 	return maxTokens
 }
+
+// minUsefulOutputTokens:低于这个输出预算,一轮回复基本做不成事 —— 连一个像样的工具调用
+// (含参数 JSON)都吐不完整,表现为"一执行就自己停下来"。取 512 而非更小值:真到了这一步,
+// 提示用户远比硬撑有意义(见 OutputBudgetLowMsg 的发出点)。
+const minUsefulOutputTokens = 512
 
 // CompactTriggerTokens 返回「上下文用量达到多少 token 就触发压缩 / 回收」的动态阈值。
 //
