@@ -57,11 +57,12 @@ const (
 )
 
 type modelT struct {
-	URL           string
-	FlashModel    string
-	ProModel      string
-	MaxTokens     int // 该供应商默认的单次 completion 上限
-	ContextWindow int // 该供应商默认的上下文窗口大小
+	URL                string
+	FlashModel         string
+	ProModel           string
+	MaxTokens          int // Default completion limit for this provider.
+	FlashContextWindow int
+	ProContextWindow   int
 }
 
 // ProviderOptions 是配置时可选的模型供应商,顺序即 UI 展示顺序(第一个为默认)。
@@ -85,41 +86,46 @@ const (
 // ".../chat/completions/chat/completions" 而请求失败。
 var modelConfig = map[string]modelT{
 	"deepseek": {
-		URL:           defaultBaseURL, // https://api.deepseek.com
-		FlashModel:    defaultFlashModel,
-		ProModel:      defaultProModel,
-		MaxTokens:     393216,
-		ContextWindow: 1_048_576, // 1M
+		URL:                defaultBaseURL,
+		FlashModel:         defaultFlashModel,
+		ProModel:           defaultProModel,
+		MaxTokens:          393216,
+		FlashContextWindow: 1_048_576, // 1M
+		ProContextWindow:   1_048_576, // 1M
 	},
 	"mimo": {
-		URL:           "https://api.xiaomimimo.com/v1",
-		FlashModel:    "mimo-v2.5",
-		ProModel:      "mimo-v2.5-pro",
-		MaxTokens:     131072,    // mimo 单次 completion 上限
-		ContextWindow: 1_048_576, // 1M
+		URL:                "https://api.xiaomimimo.com/v1",
+		FlashModel:         "mimo-v2.5",
+		ProModel:           "mimo-v2.5-pro",
+		MaxTokens:          131072,
+		FlashContextWindow: 1_048_576, // 1M
+		ProContextWindow:   1_048_576, // 1M
 	},
 	"kimi": {
-		URL:           "https://api.moonshot.cn/v1", // 必须带 /v1,端点为 /v1/chat/completions
-		FlashModel:    "kimi-k2.5",
-		ProModel:      "kimi-k2.6",
-		MaxTokens:     0,      // 0 = 不发 max_tokens,走模型默认输出上限(见 agent.chatRequest omitempty)
-		ContextWindow: 262144, // 256K
+		URL:                "https://api.moonshot.cn/v1",
+		FlashModel:         "kimi-k2.5",
+		ProModel:           "kimi-k2.6",
+		MaxTokens:          0,
+		FlashContextWindow: 262144, // 256K
+		ProContextWindow:   262144, // 256K
 	},
 	"qwen": {
-		URL:           "https://dashscope.aliyuncs.com/compatible-mode/v1", // 阿里云北京;端点 /v1/chat/completions
-		FlashModel:    "qwen3.7-plus",
-		ProModel:      "qwen3.7-max",
-		MaxTokens:     0,         // 0 = 不发 max_tokens,走模型默认输出上限
-		ContextWindow: 1_048_576, // 1M
+		URL:                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+		FlashModel:         "qwen3.7-plus",
+		ProModel:           "qwen3.7-max",
+		MaxTokens:          0,
+		FlashContextWindow: 1_048_576, // 1M
+		ProContextWindow:   1_048_576, // 1M
 	},
 	"minimax": {
-		// 全球站 OpenAI 兼容端点,端点为 /v1/chat/completions(agent 追加 /chat/completions)。
-		// 中国站为 https://api.minimaxi.com/v1,高级用户可用 custom 供应商或直接改 model.yaml 切换。
-		URL:           "https://api.minimax.io/v1",
-		FlashModel:    "MiniMax-M2.7", // 入门:上下文 204800
-		ProModel:      "MiniMax-M3",   // 旗舰:上下文 1M,与下方 ContextWindow 对齐
-		MaxTokens:     0,              // 0 = 不发 max_tokens,走模型默认输出上限
-		ContextWindow: 1_000_000,      // 1M(MiniMax-M3)
+		// The global endpoint is the native default. The China endpoint is
+		// https://api.minimaxi.com/v1 and remains available through custom overrides.
+		URL:                "https://api.minimax.io/v1",
+		FlashModel:         "MiniMax-M2.7",
+		ProModel:           "MiniMax-M3",
+		MaxTokens:          0,
+		FlashContextWindow: 204_800,
+		ProContextWindow:   1_000_000,
 	},
 }
 
@@ -155,14 +161,14 @@ func DefaultFor(provider, apiKey string) *Config {
 			BaseURL:       mc.URL,
 			Model:         mc.FlashModel,
 			APIKey:        apiKey,
-			ContextWindow: mc.ContextWindow,
+			ContextWindow: mc.FlashContextWindow,
 			MaxTokens:     mc.MaxTokens,
 		},
 		Pro: ModelEntry{
 			BaseURL:       mc.URL,
 			Model:         mc.ProModel,
 			APIKey:        apiKey,
-			ContextWindow: mc.ContextWindow,
+			ContextWindow: mc.ProContextWindow,
 			MaxTokens:     mc.MaxTokens,
 		},
 	}
@@ -173,21 +179,29 @@ func Default(apiKey string) *Config {
 	return DefaultFor(defaultProvider, apiKey)
 }
 
-// defaultContextWindow 根据模型名推断上下文窗口,给旧 yaml(没写 context_window)兜底用。
-// 已知供应商(deepseek / mimo)默认 1M tokens,其它未知模型保守取 64K。
+// defaultContextWindow infers a context window for legacy YAML without one.
 func defaultContextWindow(model string) int {
 	m := strings.ToLower(model)
+	if strings.Contains(m, "minimax-m3") {
+		return 1_000_000
+	}
+	if strings.Contains(m, "minimax-m2.7") {
+		return 204_800
+	}
 	if strings.Contains(m, "deepseek") || strings.Contains(m, "mimo") {
 		return 1_048_576
 	}
 	return 65_536
 }
 
-// defaultMaxTokens 根据模型名推断单次 completion 上限。含 deepseek 的模型沿用既有 384K;
-// 其它模型保守取 131072(mimo 等的上限),避免超过模型实际允许值被拒。
-// 给旧 model.yaml(没写 max_tokens)兜底用。
+// defaultMaxTokens infers a completion limit for legacy YAML. MiniMax keeps
+// zero so requests use the model's own output limit.
 func defaultMaxTokens(model string) int {
-	if strings.Contains(strings.ToLower(model), "deepseek") {
+	m := strings.ToLower(model)
+	if strings.Contains(m, "minimax") {
+		return 0
+	}
+	if strings.Contains(m, "deepseek") {
 		return 393216
 	}
 	return 131072

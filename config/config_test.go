@@ -6,17 +6,18 @@ import "testing"
 // 关键回归:base_url 只到域名(agent 再追加 /chat/completions),mimo 的 max_tokens=131072。
 func TestDefaultForProviders(t *testing.T) {
 	cases := []struct {
-		provider    string
-		wantBaseURL string
-		wantFlash   string
-		wantPro     string
-		wantMaxTok  int
-		wantCtxWin  int
+		provider     string
+		wantBaseURL  string
+		wantFlash    string
+		wantPro      string
+		wantMaxTok   int
+		wantFlashCtx int
+		wantProCtx   int
 	}{
-		{"deepseek", "https://api.deepseek.com", "deepseek-v4-flash", "deepseek-v4-pro", 393216, 1_048_576},
-		{"mimo", "https://api.xiaomimimo.com/v1", "mimo-v2.5", "mimo-v2.5-pro", 131072, 1_048_576},
-		{"minimax", "https://api.minimax.io/v1", "MiniMax-M2.7", "MiniMax-M3", 0, 1_000_000},
-		{"unknown-provider", "https://api.deepseek.com", "deepseek-v4-flash", "deepseek-v4-pro", 393216, 1_048_576}, // 回退 deepseek
+		{"deepseek", "https://api.deepseek.com", "deepseek-v4-flash", "deepseek-v4-pro", 393216, 1_048_576, 1_048_576},
+		{"mimo", "https://api.xiaomimimo.com/v1", "mimo-v2.5", "mimo-v2.5-pro", 131072, 1_048_576, 1_048_576},
+		{"minimax", "https://api.minimax.io/v1", "MiniMax-M2.7", "MiniMax-M3", 0, 204_800, 1_000_000},
+		{"unknown-provider", "https://api.deepseek.com", "deepseek-v4-flash", "deepseek-v4-pro", 393216, 1_048_576, 1_048_576}, // Falls back to deepseek.
 	}
 	for _, c := range cases {
 		cfg := DefaultFor(c.provider, "sk-test")
@@ -29,8 +30,8 @@ func TestDefaultForProviders(t *testing.T) {
 		if cfg.Flash.MaxTokens != c.wantMaxTok || cfg.Pro.MaxTokens != c.wantMaxTok {
 			t.Errorf("%s max_tokens = %d/%d, want %d", c.provider, cfg.Flash.MaxTokens, cfg.Pro.MaxTokens, c.wantMaxTok)
 		}
-		if cfg.Flash.ContextWindow != c.wantCtxWin || cfg.Pro.ContextWindow != c.wantCtxWin {
-			t.Errorf("%s context_window = %d/%d, want %d", c.provider, cfg.Flash.ContextWindow, cfg.Pro.ContextWindow, c.wantCtxWin)
+		if cfg.Flash.ContextWindow != c.wantFlashCtx || cfg.Pro.ContextWindow != c.wantProCtx {
+			t.Errorf("%s context_window = %d/%d, want %d/%d", c.provider, cfg.Flash.ContextWindow, cfg.Pro.ContextWindow, c.wantFlashCtx, c.wantProCtx)
 		}
 	}
 }
@@ -42,5 +43,47 @@ func TestDefaultMaxTokens(t *testing.T) {
 	}
 	if got := defaultMaxTokens("mimo-v2.5"); got != 131072 {
 		t.Errorf("mimo max_tokens = %d, want 131072", got)
+	}
+	if got := defaultMaxTokens("MiniMax-M3"); got != 0 {
+		t.Errorf("MiniMax max_tokens = %d, want 0", got)
+	}
+}
+
+func TestMiniMaxDefaultsSurviveRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	if err := Save(DefaultFor("minimax", "sk-test")); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Flash.ContextWindow != 204_800 || cfg.Pro.ContextWindow != 1_000_000 {
+		t.Fatalf("MiniMax context windows = %d/%d, want 204800/1000000", cfg.Flash.ContextWindow, cfg.Pro.ContextWindow)
+	}
+	if cfg.Flash.MaxTokens != 0 || cfg.Pro.MaxTokens != 0 {
+		t.Fatalf("MiniMax max_tokens = %d/%d, want 0/0", cfg.Flash.MaxTokens, cfg.Pro.MaxTokens)
+	}
+}
+
+func TestProviderOptionsIncludesMiniMax(t *testing.T) {
+	miniMaxIndex := -1
+	customIndex := -1
+	for i, provider := range ProviderOptions {
+		switch provider {
+		case "minimax":
+			miniMaxIndex = i
+		case ProviderCustom:
+			customIndex = i
+		}
+	}
+	if miniMaxIndex < 0 {
+		t.Fatal("ProviderOptions does not include minimax")
+	}
+	if customIndex < 0 || miniMaxIndex > customIndex {
+		t.Fatalf("minimax must appear before custom, got %v", ProviderOptions)
 	}
 }
