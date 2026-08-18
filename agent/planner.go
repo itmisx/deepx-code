@@ -177,6 +177,20 @@ func parseSwitchModelReason(rawArgs string) string {
 	return p.Reason
 }
 
+// switchModelArgs SwitchModel 工具的结构化参数。
+type switchModelArgs struct {
+	TargetLevel int    `json:"target_level"` // 目标路由级别 0-3
+	ReasonType  string `json:"reason_type"`  // 升级: "context" / "complexity"; 降级省略
+	Reason      string `json:"reason"`       // 一句话理由
+}
+
+// parseSwitchModelArgs 解析 SwitchModel 工具参数。
+func parseSwitchModelArgs(rawArgs string) switchModelArgs {
+	var p switchModelArgs
+	_ = json.Unmarshal([]byte(rawArgs), &p)
+	return p
+}
+
 // parseExploreArgs 取 Explore 工具参数:task(要探索的问题)+ thoroughness(深度,可空)。
 func parseExploreArgs(rawArgs string) (task, thoroughness string) {
 	var p struct {

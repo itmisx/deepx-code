@@ -418,37 +418,48 @@ var Tools = []Tool{
 	},
 	{
 		Name: "SwitchModel",
-		Description: "把当前对话切到 pro 模型(更强但更贵)。单向升级,升完本轮剩余都用 pro;下一轮 user 输入重新走 keyword router 决定起手。\n\n" +
-			"**何时调用 SwitchModel(满足任一条件)**:\n" +
-			"1. 需要复杂推理 / 长链路因果分析\n" +
-			"2. 需要长链路规划(多步分解、跨阶段决策)\n" +
-			"3. 需要生成大型代码块(>100 行 / 跨多文件)\n" +
-			"4. 需要高精度代码修改(关键算法 / 性能敏感路径 / 并发同步)\n" +
-			"5. 需要分析大型项目结构\n" +
-			"6. 需要多文件重构(命名 / 抽象 / 跨包改动)\n" +
-			"7. 用户明确要求 \"深度思考\" / \"仔细分析\" / \"认真想想\"\n" +
-			"8. 当前模型连续 2+ 轮处理同一问题失败 / 反复试错\n" +
-			"9. 需要高质量创作(长文档 / 设计稿 / 详细方案)\n" +
-			"10. 上下文接近窗口限制(history 占比 > 70%),需要更大窗口模型\n\n" +
-			"**何时别调**:简单单步任务(读单文件、一行替换、直接答事实、跑 ls/grep)用 flash 足够,不要无脑升级。\n\n" +
-			"**若当前已经在 pro,不要调用本工具**(已是最强模型,调用纯属多余:deepx 会 no-op 并返回提示,只是白白多一次往返)。" +
-			"另:若用户已用 /model flash 锁定 flash,本工具会被忽略,继续用 flash 即可。",
+		Description: "在模型路由的 4 级(Level0/1/2/3)之间升级或降级。\n\n" +
+			"**路由等级背景**(见系统提示): Level0(simple,flash)/Level1(medium,flash+thinking)/Level2(complex,pro+medium)/Level3(deep,pro+high)。\n\n" +
+			"**target_level 参数**: 模型判断当前任务应路由到的目标级别(0-3)。\n\n" +
+			"**升级规则(跨 2 级才升级)**:\n" +
+			"- 仅当 target_level - 当前级别 >= 2 时才实际升级\n" +
+			"- 例如: 当前 Level0 → target_level=2 或 3 才升级; 当前 Level1 → target_level=3 才升级\n" +
+			"- 若只差 1 级(如当前 Level1 → target_level=2), 不升级(差距小, 收益低)\n\n" +
+			"**升级时必须明确 reason_type**:\n" +
+			"- `context`: 因上下文压力升级(当前级别窗口不够用, 需要更大上下文窗口)\n" +
+			"- `complexity`: 因任务复杂度被低估升级(任务实际需要更深的推理/分析, 当前级别路由偏低)\n\n" +
+			"**降级规则(跨 1 级就降级, 省钱)**:\n" +
+			"- 仅当 当前级别 - target_level >= 1 时就降级\n" +
+			"- 例如: 当前 Level3 → target_level=2 或更低就降级; 当前 Level2 → target_level=1 或更低就降级\n" +
+			"- 降级不必给 reason_type(默认语义降级: 任务实际比路由级别简单)\n\n" +
+			"**reason 参数**: 一句话说明为什么切换。升级时格式: \"上下文压力(使用率约XX%)\" 或 \"复杂度被低估: 需要Level[N](原因)\"。\n\n" +
+			"**绝对不要调的情况**:\n" +
+			"- 简单任务(读文件、改一行代码、查定义、grep) — 即使上下文很长也只用 flash\n" +
+			"- 已在目标级别 — 调用纯属多余\n" +
+			"- 用户用 /model 锁定了模型",
 		Parameters: ToolParam{
 			Type: "object",
 			Properties: map[string]PropDef{
+				"target_level": {
+					Type:        "integer",
+					Description: "目标路由级别 0-3。升级需跨 2 级, 降级跨 1 级即可",
+				},
+				"reason_type": {
+					Type:        "string",
+					Enum:        []string{"context", "complexity"},
+					Description: "升级原因: context=上下文压力 / complexity=任务复杂度被低估。降级时省略",
+				},
 				"reason": {
 					Type:        "string",
-					Description: "简述切换理由(一句话),会显示给用户,让用户知道为何升级",
+					Description: "一句话切换理由。升级格式: \"上下文压力(使用率约XX%)\" 或 \"复杂度被低估: 需要Level[N](原因)\"",
 				},
 			},
-			Required: []string{"reason"},
+			Required: []string{"target_level", "reason"},
 		},
 		// Executor 为 nil:本工具在 agent/llm.go 工具循环里被拦截,不走默认 Executor。
 		// 拦截后直接修改 agent 内部 currentEntry/role,通过 ModelSwitchMsg 通知 UI。
 		Executor: nil,
 		ReadOnly: true,
-		// pro 调用时拦截层会 no-op。子 agent 不该用本工具,但不按角色隐藏(各角色工具表一致、保前缀缓存):
-		// 靠子 agent 系统提示词禁止 + Executor 为 nil 的纵深防护兜底(真调了也只返回失败,不生效)。见 subagent.go。
 	},
 	{
 		Name: "CreatePlan",

@@ -317,6 +317,12 @@ type model struct {
 	reasoningEffort string
 	// thinking 本轮路由决策的 thinking 模式(从 RouteDecision 提取)。
 	routeThinking string
+	// routeLevel 本轮路由决策的级别 0-3 (simple/medium/complex/deep)。
+	routeLevel int
+	// topicTrackingEnabled 是否启用主题追踪(从 segmenter.yaml 读取)。
+	topicTrackingEnabled bool
+	// routingEnabled 是否启用语义模型路由(从 segmenter.yaml 读取)。
+	routingEnabled bool
 	// lastModelSwitch 最近一次模型切换原因(用于右栏显示)。
 	lastModelSwitch string
 	// lastFocusID 上一次焦点话题 ID, 用于 FocusChanged 检测。
@@ -722,41 +728,51 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 	go tools.SweepPasteCache(7 * 24 * time.Hour)
 
 	// 加载分词器配置(~/.deepx/segmenter.yaml)。
-	// topic_tracking: true 时创建 TopicGraph 启用新路由。
+	// TopicTracking 与 Routing 互相独立:
+	//   - TopicTracking=true  → 创建分词器 + 主题图(话题切换检测)
+	//   - Routing=true        → 创建语义路由(4 级匹配)
+	//   两者都需要嵌入器(Embedder), 只要任一开启且配置了 Embedder 就创建嵌入器。
 	segCfg, _ := config.LoadSegmenter()
 	var segmenter agent.Segmenter
 	var segErr error
 	var embedder agent.Embedder
 	var topicGraph *agent.TopicGraph
 	var route *router.Router
-	if segCfg != nil && segCfg.TopicTracking {
-		// 创建分词器(中文词典, 用于 TF-IDF 回退)
+
+	useEmbedder := segCfg != nil && segCfg.Embedder != "" && segCfg.Embedder != "tfidf"
+	needSegmenter := segCfg != nil && segCfg.TopicTracking
+
+	if needSegmenter {
+		// 创建分词器(中文词典, 用于 TF-IDF 回退 + 主题关键词)
 		segCacheDir, _ := config.SegmenterDir()
 		segmenter, segErr = agent.NewSegmenter("zh", segCacheDir)
-		// 创建嵌入器
-		if segCfg.Embedder != "" && segCfg.Embedder != "tfidf" {
-			// ONNX 延迟加载: 启动时用 TF-IDF, 后台加载 ONNX
-			embCacheDir, _ := config.SegmenterDir()
-			embedder = agent.NewTFIDFEmbedder()
-			// 后台加载 ONNX 模型, 就绪后通过 SetEmbedder 切换
-			go func() {
-				onnxEmb, err := agent.NewEmbedder(agent.EmbedderType(segCfg.Embedder), embCacheDir, segCfg.ONNXModel)
-				if err == nil && onnxEmb != nil {
-					if topicGraph != nil {
-						topicGraph.SetEmbedder(onnxEmb)
-						// 重建主题向量: 清除旧 TF-IDF 向量, 后续消息用 ONNX 重新聚类
-						topicGraph.ResetTopics()
-					}
-					if route != nil {
-						route.SetEmbedder(onnxEmb)
-					}
-				}
-			}()
-		}
 	}
-	if segmenter != nil {
+	if useEmbedder {
+		// ONNX 延迟加载: 启动时用 TF-IDF, 后台加载 ONNX
+		embCacheDir, _ := config.SegmenterDir()
+		embedder = agent.NewTFIDFEmbedder()
+		// 后台加载 ONNX 模型, 就绪后通过 SetEmbedder 切换
+		go func() {
+			onnxEmb, err := agent.NewEmbedder(agent.EmbedderType(segCfg.Embedder), embCacheDir, segCfg.ONNXModel)
+			if err == nil && onnxEmb != nil {
+				if topicGraph != nil {
+					topicGraph.SetEmbedder(onnxEmb)
+					// 重建主题向量: 清除旧 TF-IDF 向量, 后续消息用 ONNX 重新聚类
+					topicGraph.ResetTopics()
+				}
+				if route != nil {
+					route.SetEmbedder(onnxEmb)
+				}
+			}
+		}()
+	}
+	// 主题追踪: 需要分词器(segmenter 非 nil)
+	if needSegmenter && segmenter != nil {
 		topicGraph = agent.NewTopicGraph(segmenter, embedder)
-		route = router.NewRouter(topicGraph)
+	}
+	// 语义路由: 独立于主题追踪, 只要有嵌入器即可(可无 topicGraph)
+	if segCfg != nil && segCfg.Routing {
+		route = router.NewRouter(embedder)
 	}
 
 	m := model{
@@ -792,6 +808,8 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 		webURL:          webURL,
 		topicGraph:      topicGraph,
 		router:          route,
+		topicTrackingEnabled: segCfg != nil && segCfg.TopicTracking,
+		routingEnabled:       segCfg != nil && segCfg.Routing,
 		inputHistoryIndex: -1,
 	}
 
@@ -1300,31 +1318,47 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 		routeLevel := "未路由"
 		routeSource := ""
 		routeReason := ""
+		routeModel := ""
+		matchedPattern := ""
 		if m.router != nil {
 			dec := m.router.Decide(input)
 			routeLevel = dec.Role
 			routeSource = dec.Source
 			routeReason = dec.Trace
+			// 最终选择的模型
+			if dec.Role == "pro" {
+				routeModel = m.models.Pro.Model
+			} else {
+				routeModel = m.models.Flash.Model
+			}
 			if dec.ReasoningEffort != "" {
 				routeLevel += " + reasoning_effort=" + dec.ReasoningEffort
+			}
+			if res := m.router.LastMatch(); res != nil {
+				matchedPattern = fmt.Sprintf("%s (相似度 %.0f%%)", res.MatchedAt, res.Similarity*100)
 			}
 		}
 		m.appendChat("System", fmt.Sprintf(
 			"🧪 **测试模式 - 请求前分析**\n\n"+
-				"**模型路由**: %s → %s\n"+
-				"**路由等级**: %s\n"+
+				"**路由选择**: %s → %s\n"+
 				"**路由来源**: %s\n"+
 				"**路由理由**: %s\n"+
+				"**匹配元句**: %s\n"+
 				"**工作模式**: %s\n"+
 				"**会话摘要**: %s\n"+
 				"**历史消息数**: %d 轮\n"+
 				"**主题追踪**: %s\n"+
 				"**嵌入器**: %s\n"+
 				"**发送前偏离检测**: 相似度 %.0f%%, 阈值 %.0f%%, %s",
-			m.activeModelRole, m.activeModelID,
-			routeLevel,
+			routeLevel, routeModel,
 			routeSource,
 			routeReason,
+			func() string {
+				if matchedPattern == "" {
+					return "未命中(语义匹配)"
+				}
+				return matchedPattern
+			}(),
 			m.workingMode,
 			truncTitle(m.summary, 60),
 			len(m.history),
@@ -1345,10 +1379,13 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 				return m.topicGraph.SessionFocus()
 			}(),
 			func() string {
-				if m.topicGraph == nil {
-					return "无"
+				if m.router != nil {
+					return m.router.EmbedderName()
 				}
-				return m.topicGraph.EmbedderName()
+				if m.topicGraph != nil {
+					return m.topicGraph.EmbedderName()
+				}
+				return "无"
 			}(),
 			func() float64 {
 				if m.topicGraph == nil {
@@ -1369,8 +1406,10 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 			}(),
 		))
 		// 盲区审查提示
-		if hint := m.router.ReviewHint(); hint != "" {
-			m.appendChat("System", hint)
+		if m.router != nil {
+			if hint := m.router.ReviewHint(); hint != "" {
+				m.appendChat("System", hint)
+			}
 		}
 	}
 
@@ -1386,8 +1425,10 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 			role = dec.Role
 			m.reasoningEffort = dec.ReasoningEffort
 			m.routeThinking = dec.Thinking
+			m.routeLevel = dec.Level
 		} else {
 			role = agent.RouteByKeyword(input)
+			m.routeLevel = 0 // 关键词路由无级别概念, 按最低级
 		}
 		forceRole = role
 		m.activeModelRole = role
@@ -1455,6 +1496,8 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 		m.workingMode,
 		m.reasoningEffort,
 		m.routeThinking,
+		m.topicTrackingEnabled,
+		m.routeLevel,
 	)
 	m.streamCh = ch
 	cmds = append(cmds, cmd)
@@ -2589,14 +2632,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.streaming = false
 				m.thinking = false
 				m.compactingInTurn = false // 兜底:轮内压缩的复位消息可能被 drainAndDiscard 丢掉
-				// 任务结束: 输出模型升级汇总(如有)
+				// 任务结束: 输出模型升级汇总(如有), 输出后清空避免下轮重复。
 		if m.lastModelSwitch != "" {
-			if m.testMode {
-				m.chatContent.Append(fmt.Sprintf("\n[路由] %s\n", m.lastModelSwitch))
-			} else {
-				m.chatContent.Append(fmt.Sprintf("\n[路由] %s\n", m.lastModelSwitch))
-			}
+			m.chatContent.Append(fmt.Sprintf("\n[路由] %s\n", m.lastModelSwitch))
 			m.refreshViewport()
+			m.lastModelSwitch = "" // 清空, 避免下一轮无切换时重复输出
 		}
 		// 盲区审查提示(测试模式)
 		if m.testMode && m.router != nil {
@@ -3161,15 +3201,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		oldRole := m.activeModelRole
 		m.activeModelRole = msg.Role
 		m.activeModelID = msg.ModelID
-		// 模型升级: 记录原因(LLM 未提供时自动评估)
+		// 模型切换: 记录原因(LLM 未提供时自动评估)
 		reason := msg.Reason
 		if reason == "" {
 			reason = m.evalUpgradeReason()
 		}
 		m.lastModelSwitch = fmt.Sprintf("%s→%s: %s", oldRole, msg.Role, reason)
-		// 语义匹配盲区: 仅当升级由任务复杂度导致时记录
-		if m.router != nil && m.topicGraph != nil && !msg.CompressNow {
-			m.router.RecordMiss(m.pendingUserText, nil, 0)
+		if m.router != nil {
+			switch {
+			case oldRole == "pro" && msg.Role == "flash":
+				// 降级: 匹配到的语义元句定级过高, 记录供提示降级元句。
+				m.router.RecordDowngrade()
+			case oldRole == "flash" && msg.Role == "pro" && !msg.CompressNow:
+				// 复杂度被低估升级: 记录盲区供语义学习(上下文压力升级 CompressNow=true 不记录)。
+				m.router.RecordMiss(m.pendingUserText, nil, 0)
+			}
 		}
 		return m, agent.ListenToStream(m.streamCh)
 
@@ -3244,14 +3290,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.applyTurnTopic(ctxWin)
 
-		// 任务结束: 输出模型升级汇总(如有)
+		// 任务结束: 输出模型升级汇总(如有), 输出后清空避免下轮重复。
 		if m.lastModelSwitch != "" {
-			if m.testMode {
-				m.chatContent.Append(fmt.Sprintf("\n[路由] %s\n", m.lastModelSwitch))
-			} else {
-				m.chatContent.Append(fmt.Sprintf("\n[路由] %s\n", m.lastModelSwitch))
-			}
+			m.chatContent.Append(fmt.Sprintf("\n[路由] %s\n", m.lastModelSwitch))
 			m.refreshViewport()
+			m.lastModelSwitch = "" // 清空, 避免下一轮无切换时重复输出
 		}
 		// 盲区审查提示(测试模式)
 		if m.testMode && m.router != nil {
@@ -4755,28 +4798,26 @@ func (m *model) navigateHistoryDown() {
 // 上下文压力理由含 "窗口"、"context"、"70%" 等关键词。
 
 // evalUpgradeReason 评估模型升级原因(LLM 未提供 reason 时自动计算)。
-// 基于上下文使用率 + 语义匹配度 + 历史轮数综合判断。
+// 基于上下文使用率 + 语义匹配度判断。轮数不参与: 长会话有自动/手动压缩, 轮数不代表上下文压力。
 func (m *model) evalUpgradeReason() string {
-	// 上下文使用率
+	// 上下文使用率(核心指标)
 	ctxUsage := m.contextUsagePct()
 	// 语义匹配度(与最佳语义元句的相似度)
 	semSim := 0.0
 	if m.router != nil {
 		semSim = m.router.BestSimilarity(m.pendingUserText)
 	}
-	// 历史轮数
-	turns := len(m.history)
 
-	// 上下文压力: 使用率高 + 轮数多
-	if ctxUsage > 60 || turns > 100 {
-		return fmt.Sprintf("上下文压力(使用率=%.0f%%, 轮数=%d, 语义匹配=%.0f%%)", ctxUsage, turns, semSim*100)
+	// 上下文压力: 使用率高
+	if ctxUsage > 60 {
+		return fmt.Sprintf("上下文压力(使用率=%.0f%%, 语义匹配=%.0f%%)", ctxUsage, semSim*100)
 	}
-	// 任务复杂度: 语义匹配度低 + 轮数多(长任务)
-	if semSim < 0.5 && turns > 20 {
-		return fmt.Sprintf("任务复杂度高(语义匹配=%.0f%%, 轮数=%d, 上下文=%.0f%%)", semSim*100, turns, ctxUsage)
+	// 任务复杂度: 语义匹配度低(语义元句未覆盖)
+	if semSim < 0.5 {
+		return fmt.Sprintf("任务复杂度高(语义匹配=%.0f%%, 上下文=%.0f%%)", semSim*100, ctxUsage)
 	}
 	// 混合: 两者兼有
-	return fmt.Sprintf("综合因素(语义=%.0f%%, 上下文=%.0f%%, 轮数=%d)", semSim*100, ctxUsage, turns)
+	return fmt.Sprintf("综合因素(语义=%.0f%%, 上下文=%.0f%%)", semSim*100, ctxUsage)
 }
 
 // contextUsagePct 估算当前上下文使用百分比。

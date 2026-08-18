@@ -41,7 +41,7 @@ const restartCompactKeepFactor = 2
 // 这样 prompt 文本 / 工具 / skill / mcp 任一改动都能检测到,dev(go run)和发布版均生效,
 // 不再依赖 version 代理(之前手改提示词、go run 时 version 恒为 "dev",签名不变 → 漏检)。
 func (m *model) prefixSignature() string {
-	core := agent.BuildSystemPrompt(m.workspace, m.skillCatalog, "")
+	core := agent.BuildSystemPrompt(m.workspace, m.skillCatalog, "", false)
 
 	specs := make([]tools.OpenAIToolSpec, 0, len(tools.Tools))
 	for _, t := range tools.Tools {

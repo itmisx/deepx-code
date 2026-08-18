@@ -114,6 +114,7 @@ type ModelSwitchMsg struct {
 	ModelID string // 实际 model id
 	Reason  string // 可选,描述路由依据(目前为空,B 方案静默路由)
 	// CompressNow 建议立即压缩上下文(因上下文压力升级时设置)。
+	// 仅"上下文压力"升级时=true; "复杂度被低估"升级时=false(TUI 侧据此记录盲区供语义学习)。
 	CompressNow bool
 }
 
@@ -551,7 +552,15 @@ func coreSystemPrompt(workspace, skillCatalog string) string {
 - 任务模糊: 陈述假设,按最安全解读 proceed
 
 # 运行时
-- 当前工作目录:%s`,
+- 当前工作目录:%s
+
+# 模型路由等级(了解即可,用于判断任务复杂度与反馈路由质量)
+deepx 在请求前会按任务复杂度路由到不同等级:
+- Level 0 (simple) → flash 模型, 无 thinking: 简单操作(读文件/改一行/查定义/grep)
+- Level 1 (medium) → flash 模型, thinking 开启: 代码解读/单文件修改/调用链
+- Level 2 (complex) → pro 模型, reasoning_effort=medium: 问题分析/跨模块重构
+- Level 3 (deep) → pro 模型, reasoning_effort=high: 架构设计/安全审查/技术选型
+如果任务复杂度与当前等级不匹配, 用 SwitchModel 反馈(见工具说明)。`,
 		workspace,
 	)
 	if skillCatalog != "" {
@@ -581,8 +590,11 @@ const topicTrackingPrompt = `
 // BuildSystemPrompt 主 agent 的 system prompt = 共用核心 + 会话摘要尾部。
 // 摘要垫在最后:核心 + skill 那段会话内字节不变,即使摘要每次压缩都变,前缀仍命中,
 // 失效点只从摘要开始(详见前缀缓存优化设计)。
-func BuildSystemPrompt(workspace, skillCatalog, summary string) string {
-	base := coreSystemPrompt(workspace, skillCatalog) + topicTrackingPrompt
+func BuildSystemPrompt(workspace, skillCatalog, summary string, topicTracking bool) string {
+	base := coreSystemPrompt(workspace, skillCatalog)
+	if topicTracking {
+		base += topicTrackingPrompt
+	}
 	// 持久偏好/项目约定:读会话内冻结的快照(currentPrefs),只在启动 / 压缩时由 RefreshPreferences 刷新,
 	// 中途每轮复用同一份 → 前缀稳定、缓存命中。会话中途写入的 AGENTS.md 下次压缩/重启才生效。
 	if prefs := currentPrefs(); prefs != "" {
@@ -606,6 +618,8 @@ func StartStream(
 	workingMode WorkingMode, // 工作模式:每轮把对应 skill 引导追加到最后一条 user 消息(renderWorkingMode)
 	reasoningEffort string, // 路由决策的推理深度(""/"medium"/"high");空时使用模型默认配置
 	thinking string, // 路由决策的 thinking 模式(""/"enabled"/"disabled");空时使用模型默认配置
+	topicTracking bool, // 是否启用主题追踪(决定是否拼接 topicTrackingPrompt)
+	currentLevel int, // 当前路由级别 0-3 (SwitchModel 据此评估升级/降级跨级数)
 ) (tea.Cmd, <-chan tea.Msg) {
 	ch := make(chan tea.Msg, 128)
 
@@ -625,7 +639,7 @@ func StartStream(
 			// 在首轮注入 system 提示:当前工作目录 + 任务拆解 + plan 节点的 model 选择指南。
 			// 入口模型已经由 keyword router 决定(flash 或 pro);模型自行判断要不要 CreatePlan 拆任务。
 			if len(convo) == 0 || convo[0].Role != "system" {
-				sysBase := BuildSystemPrompt(workspace, skillCatalog, summary)
+				sysBase := BuildSystemPrompt(workspace, skillCatalog, summary, topicTracking)
 				convo = append([]ChatMessage{{Role: "system", Content: sysBase}}, convo...)
 			}
 		}
@@ -753,7 +767,7 @@ func StartStream(
 				} else {
 					summary = sum
 					kept := CutHistory(hist, cutIdx) // 保留段不以 user 开头时,补回用户任务原文
-					convo = append([]ChatMessage{{Role: "system", Content: BuildSystemPrompt(workspace, skillCatalog, summary)}}, kept...)
+					convo = append([]ChatMessage{{Role: "system", Content: BuildSystemPrompt(workspace, skillCatalog, summary, false)}}, kept...)
 					lastPromptTokens = 0 // 压完归零,等下一轮真实 usage 再判
 					// 压缩后 prompt 的本地估算:一份两用 —— ① 防死循环判断(下面);② 随 CompactedMsg
 					// 带给 TUI 刷新状态栏(见 CompactedMsg.EstPromptTokens 注释)。
@@ -1043,36 +1057,92 @@ func StartStream(
 						}
 					}
 				case "SwitchModel":
-					// 单向升级到 pro。已经在 pro 是 no-op,flash → pro 实际换 currentEntry。
-					// 切换立即生效:本轮工具循环下一次 streamOnce 用新 entry。
-					reason := parseSwitchModelReason(tc.Function.Arguments)
-					if forceRole == tools.RoleFlash {
-						// 用户用 /model flash 锁定,模型无权越权升级。
+					// 4 级路由间的升级/降级, 用 target_level 指定目标级别。
+					// 升级规则: target_level - currentLevel >= 2 才升级(跨 2 级)。
+					// 降级规则: currentLevel - target_level >= 1 就降级(跨 1 级, 省钱)。
+					// 升级必须带 reason_type: context(上下文压力)→ 完成后压缩; complexity(复杂度被低估)→ 记录盲区。
+					// 降级默认语义降级(任务比路由级别简单), 不带 reason_type。
+					args := parseSwitchModelArgs(tc.Function.Arguments)
+					reason := args.Reason
+					if forceRole == tools.RoleFlash || forceRole == tools.RolePro {
+						// 用户用 /model 锁定,模型无权越权切换。
 						result = tools.ToolResult{
-							Output:  "用户已锁定 flash 模型(/model flash),忽略本次升级,继续用 flash 完成任务。",
+							Output:  "用户已锁定模型(/model),忽略本次切换,继续用当前模型完成任务。",
 							Success: true,
 						}
-					} else if role == tools.RolePro {
+					} else if args.TargetLevel < 0 || args.TargetLevel > 3 {
 						result = tools.ToolResult{
-							Output:  "已经在 pro 模型,无需切换。继续完成任务即可。",
-							Success: true,
-						}
-					} else if models.Pro.Model == "" {
-						result = tools.ToolResult{
-							Output:  "pro 模型未配置(model.yaml 里 pro.model 为空),无法升级。继续用 flash 处理。",
+							Output:  fmt.Sprintf("target_level 非法(%d), 有效范围 0-3。本次忽略。", args.TargetLevel),
 							Success: false,
 						}
 					} else {
-						role = tools.RolePro
-						currentEntry = models.Pro
-						// 工具表不随角色变(各角色一致),无需重算 toolSpecs。
-						ch <- ModelSwitchMsg{Role: role, ModelID: currentEntry.Model, Reason: reason, CompressNow: isContextPressure(reason)}
-						if isContextPressure(reason) {
-							forceCompaction = true
-						}
-						result = tools.ToolResult{
-							Output:  fmt.Sprintf("已切到 pro 模型 (%s)。本轮剩余请求 + reasoning 用 pro 处理。", currentEntry.Model),
-							Success: true,
+						diff := args.TargetLevel - currentLevel
+						switch {
+						case diff >= 2:
+							// 升级且跨 >=2 级: 允许。
+							if models.Pro.Model == "" {
+								result = tools.ToolResult{
+									Output:  "pro 模型未配置(model.yaml 里 pro.model 为空),无法升级。继续用当前模型处理。",
+									Success: false,
+								}
+							} else {
+								// 映射目标级别到模型配置。
+								targetRole, targetEffort, targetThinking := levelConfig(args.TargetLevel)
+								role = targetRole
+								currentEntry = models.Pro
+								if args.TargetLevel == 2 || args.TargetLevel == 3 {
+									currentEntry = models.Pro
+								}
+								// 更新本轮后续请求的推理参数。
+								if targetEffort != "" {
+									reasoningEffort = targetEffort
+								}
+								if targetThinking != "" {
+									thinking = targetThinking
+								}
+								ch <- ModelSwitchMsg{Role: role, ModelID: currentEntry.Model, Reason: reason, CompressNow: args.ReasonType == "context"}
+								if args.ReasonType == "context" {
+									forceCompaction = true // 上下文压力升级: 完成后立即压缩
+								}
+								result = tools.ToolResult{
+									Output:  fmt.Sprintf("已升级到 Level%d (%s)。本轮剩余请求用更高等级处理。升级原因: %s", args.TargetLevel, currentEntry.Model, reasonTypeLabel(args.ReasonType)),
+									Success: true,
+								}
+							}
+						case diff <= -1:
+							// 降级且跨 >=1 级: 允许(省钱)。
+							if models.Flash.Model == "" {
+								result = tools.ToolResult{
+									Output:  "flash 模型未配置(model.yaml 里 flash.model 为空),无法降级。继续用当前模型处理。",
+									Success: false,
+								}
+							} else {
+								targetRole, targetEffort, targetThinking := levelConfig(args.TargetLevel)
+								role = targetRole
+								if args.TargetLevel <= 1 {
+									currentEntry = models.Flash
+								} else {
+									currentEntry = models.Pro
+								}
+								if targetEffort != "" {
+									reasoningEffort = targetEffort
+								}
+								if targetThinking != "" {
+									thinking = targetThinking
+								}
+								// 语义降级: 不带 reason_type。
+								ch <- ModelSwitchMsg{Role: role, ModelID: currentEntry.Model, Reason: reason, CompressNow: false}
+								result = tools.ToolResult{
+									Output:  fmt.Sprintf("已降级到 Level%d (%s)。本轮剩余请求用较低等级处理(语义降级)。", args.TargetLevel, currentEntry.Model),
+									Success: true,
+								}
+							}
+						default:
+							// 跨级数不足: 升级需跨 >=2, 降级需跨 >=1。差距小, 不值得切换。
+							result = tools.ToolResult{
+								Output:  fmt.Sprintf("当前 Level%d, 目标 Level%d, 跨级数不足(%d)。升级需跨 ≥2, 降级需跨 ≥1。继续用当前等级处理。", currentLevel, args.TargetLevel, diff),
+								Success: true,
+							}
 						}
 					}
 				case "OCR":
@@ -1973,12 +2043,32 @@ func toolOutputReference(name, path string) string {
 }
 
 // isContextPressure 判断 SwitchModel 升级理由是否因上下文压力。
-func isContextPressure(reason string) bool {
-	// 工具描述中 #10 明确说明: "上下文接近窗口限制,需要更大窗口模型"
-	// 模型可能用不同措辞, 关键特征: 提及窗口/上下文/容量已满
-	lower := strings.ToLower(reason)
-	return strings.Contains(lower, "窗口") ||
-		strings.Contains(lower, "上下文") ||
-		(strings.Contains(lower, "context") && strings.Contains(lower, "window")) ||
-		strings.Contains(lower, "70%")
+// reasonTypeLabel 升级原因的类型标签(用于 ToolResult 反馈给模型)。
+func reasonTypeLabel(rt string) string {
+	switch rt {
+	case "context":
+		return "上下文压力(完成后将压缩上下文)"
+	case "complexity":
+		return "任务复杂度被低估(已反馈语义学习)"
+	default:
+		return "未指定"
+	}
+}
+
+// levelConfig 路由级别到模型配置的映射。
+//   - Level 0 (simple)  → flash, 无 thinking
+//   - Level 1 (medium)  → flash, thinking enabled
+//   - Level 2 (complex) → pro, reasoning_effort=medium, thinking disabled
+//   - Level 3 (deep)    → pro, reasoning_effort=high, thinking disabled
+func levelConfig(level int) (role, effort, thinking string) {
+	switch level {
+	case 1:
+		return tools.RoleFlash, "", "enabled"
+	case 2:
+		return tools.RolePro, "medium", "disabled"
+	case 3:
+		return tools.RolePro, "high", "disabled"
+	default: // 0
+		return tools.RoleFlash, "", ""
+	}
 }

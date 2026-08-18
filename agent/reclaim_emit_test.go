@@ -51,7 +51,7 @@ func TestStartStream_EmitsContextReclaimed(t *testing.T) {
 		ContextWindow: ctxWin, MaxTokens: 256,
 	}}
 	_, ch := StartStream(context.Background(), cfg, hist,
-		AgentMode_Auto, t.TempDir(), "", "", "flash", WorkingModeDefault)
+		AgentMode_Auto, t.TempDir(), "", "", "flash", WorkingModeDefault, "", "", false, 0)
 
 	var got []ContextReclaimedMsg
 	for msg := range ch {
@@ -88,7 +88,7 @@ func TestStartStream_NoReclaimWhenSmall(t *testing.T) {
 	}}
 	_, ch := StartStream(context.Background(), cfg,
 		[]ChatMessage{{Role: "user", Content: "你好"}},
-		AgentMode_Auto, t.TempDir(), "", "", "flash", WorkingModeDefault)
+		AgentMode_Auto, t.TempDir(), "", "", "flash", WorkingModeDefault, "", "", false, 0)
 
 	for msg := range ch {
 		if m, ok := msg.(ContextReclaimedMsg); ok {

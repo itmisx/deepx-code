@@ -86,7 +86,7 @@ func TestInLoopCompact_TransientRetriesAfterCooldown(t *testing.T) {
 func runLoopCountingCompactAttempts(t *testing.T, cfg ModelConfig, hist []ChatMessage) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	_, ch := StartStream(ctx, cfg, hist, AgentMode_Auto, t.TempDir(), "", "", "flash", WorkingModeDefault)
+	_, ch := StartStream(ctx, cfg, hist, AgentMode_Auto, t.TempDir(), "", "", "flash", WorkingModeDefault, "", "", false, 0)
 
 	attempts, rounds := 0, 0
 	for msg := range ch {
@@ -106,7 +106,7 @@ func runLoopCountingCompactAttempts(t *testing.T, cfg ModelConfig, hist []ChatMe
 func runLoopCountingCompactAttempts2(t *testing.T, cfg ModelConfig, hist []ChatMessage) (attempts, est int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	_, ch := StartStream(ctx, cfg, hist, AgentMode_Auto, t.TempDir(), "", "", "flash", WorkingModeDefault)
+	_, ch := StartStream(ctx, cfg, hist, AgentMode_Auto, t.TempDir(), "", "", "flash", WorkingModeDefault, "", "", false, 0)
 
 	rounds := 0
 	for msg := range ch {

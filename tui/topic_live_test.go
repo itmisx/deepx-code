@@ -124,7 +124,7 @@ func TestLiveTopic(t *testing.T) {
 		{"B system + 每条 user 尾部", true},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
-			msgs := []liveMsg{{Role: "system", Content: agent.BuildSystemPrompt("/tmp/ws", "", "")}}
+			msgs := []liveMsg{{Role: "system", Content: agent.BuildSystemPrompt("/tmp/ws", "", "", false)}}
 			hit, shiftOK := 0, 0
 			for i, turn := range turns {
 				text := turn.text

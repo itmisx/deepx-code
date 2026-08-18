@@ -226,7 +226,7 @@ func EstimateHistoryTokens(history []ChatMessage) int {
 // EstimatePromptTokens 本地估算整个 prompt 的 token 数 = 系统提示词 + 工具定义 JSON + 历史。
 // 仅在 API 没返回 usage 时作兜底(调用方优先用真实 prompt_tokens)。
 func EstimatePromptTokens(workspace, skillCatalog, summary string, history []ChatMessage) int {
-	t := EstTokens(BuildSystemPrompt(workspace, skillCatalog, summary))
+	t := EstTokens(BuildSystemPrompt(workspace, skillCatalog, summary, false))
 
 	specs := make([]tools.OpenAIToolSpec, 0, len(tools.Tools))
 	for _, tl := range tools.Tools {

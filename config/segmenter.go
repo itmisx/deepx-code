@@ -11,9 +11,13 @@ import (
 // SegmenterConfig 分词器独立配置, 存储于 ~/.deepx/segmenter.yaml。
 // SegmenterConfig 分词器独立配置, 存储于 ~/.deepx/segmenter.yaml。
 type SegmenterConfig struct {
-	// TopicTracking 是否启用主题追踪(开启后启用新路由 + 偏离检测 + 语义匹配)。
+	// TopicTracking 是否启用主题追踪(话题切换检测 + 侧重点摘要)。
 	// 设为 true 时自动创建分词器和嵌入器。默认 false。
 	TopicTracking bool `yaml:"topic_tracking,omitempty"`
+	// Routing 是否启用语义模型路由(4 级: simple/medium/complex/deep)。
+	// 与 TopicTracking 互相独立: 可只开路由不开主题追踪, 或反之。
+	// 设为 true 且配置了 Embedder 时创建语义路由。默认 false。
+	Routing bool `yaml:"routing,omitempty"`
 	// DictURL 自定义词典下载地址。空则使用默认 jieba 词典。
 	DictURL string `yaml:"dict_url,omitempty"`
 	// Embedder 嵌入器类型: "tfidf"(默认) / "onnx"(语义级)。
