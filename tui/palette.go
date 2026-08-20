@@ -44,6 +44,12 @@ func slashCommands() []struct{ name, desc string } {
 		{"/sandbox", T("cmd.sandbox.desc")},
 		{"/working-mode", T("cmd.workingmode.desc")},
 		{"/undo", T("cmd.undo.desc")},
+		{"/router-list-pro", T("cmd.routerlistpro.desc")},
+		{"/router-list-flash", T("cmd.routerlistflash.desc")},
+		{"/router-add-pro", T("cmd.routeraddpro.desc")},
+		{"/router-add-flash", T("cmd.routeraddflash.desc")},
+		{"/router-delete-pro", T("cmd.routerdeletepro.desc")},
+		{"/router-delete-flash", T("cmd.routerdeleteflash.desc")},
 		{"/help", T("cmd.help.desc")},
 		{"/exit", T("cmd.exit.desc")},
 	}
@@ -55,7 +61,8 @@ func slashCommands() []struct{ name, desc string } {
 // /mcp-add /lang /sessions 等)不在此列——它们无参即弹窗,本就是"弹出"。
 func slashCommandNeedsArg(name string) bool {
 	switch name {
-	case "/workflow", "/ultracode", "/session-rename":
+	case "/workflow", "/ultracode", "/session-rename",
+		"/router-add-pro", "/router-add-flash", "/router-delete-pro", "/router-delete-flash":
 		return true
 	}
 	return false

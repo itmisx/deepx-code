@@ -66,7 +66,7 @@ func webHost() string {
 func webPort() int { return metaGet().WebPort }
 
 // modelPinDefault 返回全局记忆的 /model 选择,给「从没锁过模型」的会话当起手默认。
-// 值域与 /model 一致(auto/flash/pro);空或非法一律回落 "auto",即原有的关键词路由。
+// 值域与 /model 一致(auto/flash/pro);空或非法一律回落 "auto",即自动语义路由。
 // 容忍大小写与空白 —— 这个字段虽然由 /model 自动写,但用户手改 meta.json 也是合法用法。
 func modelPinDefault() string {
 	switch strings.ToLower(strings.TrimSpace(metaGet().ModelPin)) {

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"deepx/agent"
+	"deepx/agent/router"
 	"deepx/config"
 	"deepx/mcp"
 	"deepx/session"
@@ -152,7 +153,7 @@ type model struct {
 	// 每条新用户消息默认从 flash 起手;agent.ModelSwitchMsg 到达时更新为 pro。
 	activeModelRole string
 
-	// modelPin 是用户用 /model 锁定的模型:"auto"(默认,走关键词路由) / "flash" / "pro"。
+	// modelPin 是用户用 /model 锁定的模型:"auto"(默认,走语义路由) / "flash" / "pro"。
 	// 锁定时作为 forceRole 传给 StartStream 绕过路由,并在压缩后重注锁定提示对。
 	modelPin      string
 	activeModelID string
@@ -201,7 +202,7 @@ type model struct {
 	// 占位符,避免超长文本被 textarea 的 CharLimit 截断、也不撑爆输入区。发送时再展开回全文。
 	// 参考 free-code 的 pastedContents 机制。短粘贴(< 阈值)不走这里,直接进输入框。
 	pastedTexts map[int]string
-	nextPasteID  int
+	nextPasteID int
 
 	currentReply *strings.Builder
 
@@ -709,36 +710,36 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 	go tools.SweepPasteCache(7 * 24 * time.Hour)
 
 	m := model{
-		mcpMgr:          mcpMgr,
-		mcpAddInput:     mi,
-		skillAddInput:   ski,
-		webConfigInput:  wci,
-		chatContent:     newChatLog(maxChatBytes),
-		currentReply:    &strings.Builder{},
-		chatViewport:    vp,
-		input:           ti,
-		models:          models,
-		visionByModel:   visionByModel,
-		activeModelRole: role,
-		activeModelID:   activeID,
-		modelPin:        "auto",
-		version:         version,
-		mode:            agent.AgentMode_Auto,
-		workingMode:     agent.WorkingModeDefault, // 默认 kp;下方从 session 恢复
-		status:          "idle",
-		hideStatusPanel:  metaGet().HideStatus,       // 记忆上次的状态栏显隐
-		showThinking:     metaGet().ShowThinking,     // 记忆上次的思考显隐
-		mousePassthrough: metaGet().MousePassthrough, // 记忆上次的鼠标穿透选择(F2)
-		spinner:         sp,
-		workspace:       wd,
-		setupInput:      si,
-		session:         sess,
-		skillLoader:     loader,
-		skillCatalog:    skillCatalog,
-		workflowLoader:  workflowLoader,
-		hub:             hub,
-		srv:             srv,
-		webURL:          webURL,
+		mcpMgr:            mcpMgr,
+		mcpAddInput:       mi,
+		skillAddInput:     ski,
+		webConfigInput:    wci,
+		chatContent:       newChatLog(maxChatBytes),
+		currentReply:      &strings.Builder{},
+		chatViewport:      vp,
+		input:             ti,
+		models:            models,
+		visionByModel:     visionByModel,
+		activeModelRole:   role,
+		activeModelID:     activeID,
+		modelPin:          "auto",
+		version:           version,
+		mode:              agent.AgentMode_Auto,
+		workingMode:       agent.WorkingModeDefault, // 默认 kp;下方从 session 恢复
+		status:            "idle",
+		hideStatusPanel:   metaGet().HideStatus,       // 记忆上次的状态栏显隐
+		showThinking:      metaGet().ShowThinking,     // 记忆上次的思考显隐
+		mousePassthrough:  metaGet().MousePassthrough, // 记忆上次的鼠标穿透选择(F2)
+		spinner:           sp,
+		workspace:         wd,
+		setupInput:        si,
+		session:           sess,
+		skillLoader:       loader,
+		skillCatalog:      skillCatalog,
+		workflowLoader:    workflowLoader,
+		hub:               hub,
+		srv:               srv,
+		webURL:            webURL,
 		inputHistoryIndex: -1,
 	}
 
@@ -870,6 +871,10 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 
 	// 每次启动的欢迎语。
 	m.appendChat("System", T("welcome"))
+
+	// 路由样板句:用户在 ~/.deepx/router.yaml 增删过就用他的,否则用内置默认表。
+	// 放在 welcome 之后:解析失败要往聊天区报一行,不能静默(见 router_cmd.go)。
+	m.loadRouterPatterns()
 
 	// web 控制面板启用时,在 chat 区给出可点击 / 可复制的地址 —— 浏览器里能新建会话、
 	// 切会话、切权限/沙箱/工作模式,状态与终端实时对齐。
@@ -1251,6 +1256,10 @@ func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, m.input.Focus(), checkForUpgradeCmd(m.version), cursorBlinkTick()}
 	// 探测终端背景明暗:回应经 tea.BackgroundColorMsg 到 Update,据此切亮/暗主题(issue #163)。
 	cmds = append(cmds, tea.RequestBackgroundColor)
+
+	// 语义路由模型:后台补齐,不阻塞启动。没就绪就不做入口路由(起手一律 flash),
+	// 就绪后自动接上(见 router_cmd.go 的 startSemanticRouter)。
+	cmds = append(cmds, m.startSemanticRouter())
 	// 重启检测到前缀变化且历史够大时,在首请求前先跑一次缓存友好压缩。
 	if m.pendingCompactSys != "" {
 		cmds = append(cmds, m.restartCompactionCmd())
@@ -1428,7 +1437,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !applyTheme(msg.IsDark()) {
 			return m, nil
 		}
-		m.mdRenderers = nil          // 旧实例 bake 的是旧主题的 glamour 样式,丢弃重建
+		m.mdRenderers = nil              // 旧实例 bake 的是旧主题的 glamour 样式,丢弃重建
 		m.chatContent.InvalidateRender() // 清掉每段旧主题的 ANSI 缓存,否则宽度没变时 Render 复用旧色(需拖窗口才刷新)
 		m.spinner.Style = lipgloss.NewStyle().Foreground(spinnerColor)
 		tas := m.input.Styles()
@@ -1448,34 +1457,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.SetWidth(leftW - inputGutterWidth)
 		// 窗口尺寸变了 → wrap 重算 → 老 line 号失效,必须清选区
 		m.selecting = false
-			m.inputSelecting = false
+		m.inputSelecting = false
 		m.refreshViewport()
 
-		case tea.MouseWheelMsg:
-			// modal 期间忽略
-			if m.showSetup || m.showLangModal || m.showWorkingModeModal || m.showModelModal || m.showSandboxModal || m.showReasoningModal || m.showSessionList || m.showProviderModal {
-				return m, nil
-			}
-			// 滚轮:按鼠标所在区域分流——输入区翻多行输入,历史区翻对话;顺便取消选区
-			if m.selecting {
-				m.selecting = false
-			}
-			_, vpH := m.layout()
-			if msg.Y > vpH {
-				// 分隔线以下=输入区。textarea 的滚动由光标驱动(视口强制跟随光标),
-				// 直接透传 MouseWheelMsg 滚不动;改成发 KeyPressMsg 上/下,让光标移动带动视口滚动,
-				// 这样粘贴长文本后也能滚到开头(实测确认)。
-				key := tea.KeyDown
-				if msg.Button == tea.MouseWheelUp {
-					key = tea.KeyUp
-				}
-				var c tea.Cmd
-				m.input, c = m.input.Update(tea.KeyPressMsg(tea.Key{Code: key}))
-				return m, c
+	case tea.MouseWheelMsg:
+		// modal 期间忽略
+		if m.showSetup || m.showLangModal || m.showWorkingModeModal || m.showModelModal || m.showSandboxModal || m.showReasoningModal || m.showSessionList || m.showProviderModal {
+			return m, nil
+		}
+		// 滚轮:按鼠标所在区域分流——输入区翻多行输入,历史区翻对话;顺便取消选区
+		if m.selecting {
+			m.selecting = false
+		}
+		_, vpH := m.layout()
+		if msg.Y > vpH {
+			// 分隔线以下=输入区。textarea 的滚动由光标驱动(视口强制跟随光标),
+			// 直接透传 MouseWheelMsg 滚不动;改成发 KeyPressMsg 上/下,让光标移动带动视口滚动,
+			// 这样粘贴长文本后也能滚到开头(实测确认)。
+			key := tea.KeyDown
+			if msg.Button == tea.MouseWheelUp {
+				key = tea.KeyUp
 			}
 			var c tea.Cmd
-			m.chatViewport, c = m.chatViewport.Update(msg)
+			m.input, c = m.input.Update(tea.KeyPressMsg(tea.Key{Code: key}))
 			return m, c
+		}
+		var c tea.Cmd
+		m.chatViewport, c = m.chatViewport.Update(msg)
+		return m, c
 
 	case tea.MouseClickMsg:
 		if m.showSetup || m.showLangModal || m.showWorkingModeModal || m.showModelModal || m.showSandboxModal || m.showReasoningModal || m.showSessionList || m.showProviderModal {
@@ -2395,13 +2404,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// 窗口内第二次:真正中断。
 				m.lastEscAt = time.Time{}
 				m = m.interruptStream()
-			// 打断后把这一轮的用户输入回填到空输入框,方便改一下重发。
-			// 用 pendingInputOriginal(原始形态、含粘贴占位符),不要用 pendingUserText
-			// (已展开的全文):190 行全文塞回 4000 上限的输入框会被截断、丢失。
-			// 仅当输入框为空时回填,不覆盖用户已敲入的新内容。
-			if strings.TrimSpace(m.input.Value()) == "" && m.pendingInputOriginal != "" {
-				m.input.SetValue(m.pendingInputOriginal)
-			}
+				// 打断后把这一轮的用户输入回填到空输入框,方便改一下重发。
+				// 用 pendingInputOriginal(原始形态、含粘贴占位符),不要用 pendingUserText
+				// (已展开的全文):190 行全文塞回 4000 上限的输入框会被截断、丢失。
+				// 仅当输入框为空时回填,不覆盖用户已敲入的新内容。
+				if strings.TrimSpace(m.input.Value()) == "" && m.pendingInputOriginal != "" {
+					m.input.SetValue(m.pendingInputOriginal)
+				}
 				m.refreshViewport()
 				return m, nil
 			}
@@ -2800,6 +2809,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.compactingInTurn = true
 		return m, agent.ListenToStream(m.streamCh)
 
+	case routerAssetMsg:
+		// 语义路由资产的最终状态。就绪不打扰用户(它只是个静默增强);
+		// 失败必须说一声 —— 关键词表已删除,语义是入口路由的唯一判据,它没起来就等于
+		// 完全不做自动路由。用户不知情的话只会觉得"复杂任务怎么老是用 flash 起手"。
+		if msg.status == router.StatusFailed {
+			note := "语义模型下载失败,**入口自动路由未启用** —— 起手一律 flash," +
+				"由模型在执行中按需 SwitchModel 自行升到 pro,不影响正常使用。下次启动会重试。\n\n" +
+				"失败原因:" + msg.err
+			m.chatContent.Open(kindSystem, note)
+			m.refreshViewport()
+		}
+		return m, nil
+
 	case agent.OutputBudgetLowMsg:
 		// 上下文把输出预算挤没了:模型这轮很可能刚开口就停。夹取本身是静默的,
 		// 不出这一声,用户只看到"莫名其妙停下来、工具怎么调都失败"(issue #232)。
@@ -3121,7 +3143,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.history = msg.reclaimedHistory
 				est := m.estimatePromptTokens()
 				if m.lastUsage != nil && est > 0 && est < m.lastUsage.PromptTokens {
-					m.lastUsage.PromptTokens = est   // 回收后上下文变小,把过期的真实值降下来
+					m.lastUsage.PromptTokens = est // 回收后上下文变小,把过期的真实值降下来
 					m.lastUsage.PromptCacheHitTokens = 0
 				}
 				if m.session != nil {
@@ -3508,6 +3530,21 @@ func (m *model) handleSlashCommand(input string) tea.Cmd {
 	if strings.HasPrefix(cmd, "/working-mode") { // 带参数(kp/openspec/sp)
 		return m.handleWorkingModeCommand(cmd)
 	}
+	// 两组分开维护:-pro 管"升级 pro",-flash 管"维持 flash"。
+	// 命令名带完整后缀,彼此不互为前缀 —— 别再退回 "/router-add" 这种短前缀,
+	// 那会把 -pro / -flash 一起吞掉。
+	if strings.HasPrefix(cmd, "/router-add-pro") { // 带参数:整句(保留大小写,传原文)
+		return m.handleRouterAddCommand("pro", input)
+	}
+	if strings.HasPrefix(cmd, "/router-add-flash") {
+		return m.handleRouterAddCommand("flash", input)
+	}
+	if strings.HasPrefix(cmd, "/router-delete-pro") { // 带参数:序号或整句(同上)
+		return m.handleRouterDeleteCommand("pro", input)
+	}
+	if strings.HasPrefix(cmd, "/router-delete-flash") {
+		return m.handleRouterDeleteCommand("flash", input)
+	}
 	if strings.HasPrefix(cmd, "/session-rename") { // 带参数:新标题(保留大小写,传原文)
 		return m.handleSessionRenameCommand(input)
 	}
@@ -3559,6 +3596,10 @@ func (m *model) handleSlashCommand(input string) tea.Cmd {
 		}
 	case "/compact":
 		return m.startManualCompaction()
+	case "/router-list-pro":
+		m.handleRouterListCommand("pro")
+	case "/router-list-flash":
+		m.handleRouterListCommand("flash")
 	case "/status":
 		m.toggleStatusPanel()
 	case "/thinking":
@@ -3866,7 +3907,7 @@ func (m *model) openModelModal() {
 }
 
 // applyModelPin 应用模型选择:设 m.modelPin;锁定 flash/pro 时插入一对 user/assistant
-// 锁定提示(让模型从上下文知道当前锁的是哪个),auto 恢复关键词路由。
+// 锁定提示(让模型从上下文知道当前锁的是哪个),auto 恢复语义路由。
 // 锁的强制力在 StartStream(forceRole)+SwitchModel 闸门,不依赖这对消息。
 func (m *model) applyModelPin(arg string) {
 	switch arg {

@@ -76,7 +76,7 @@ type ModelEntry struct {
 }
 
 // ModelConfig 双模型配置。Flash 处理简单/查询型任务,Pro 处理复杂/规划型任务。
-// 入口路由(keyword_router.go)决定本轮起手用哪个;每个 plan 节点也可以独立指定 model 字段。
+// 入口路由(entry_router.go)决定本轮起手用哪个;每个 plan 节点也可以独立指定 model 字段。
 // 两个 entry 可以共用同一个 BaseURL/APIKey,只 Model 不同(常见场景);也可以完全分离。
 type ModelConfig struct {
 	Flash ModelEntry
@@ -503,7 +503,7 @@ func UnmarshalToolSpecs(s string) []tools.OpenAIToolSpec {
 
 // === 入口 ===
 
-// StartStream 启动一个对话回合。入口由 RouteByKeyword 决定起手模型(flash/pro),
+// StartStream 启动一个对话回合。入口由 RouteEntry 决定起手模型(flash/pro),
 // 本轮锁定该模型不再切换。复杂任务由模型主动调 CreatePlan 拆分,plan 节点的 model 字段
 // 由 sub-agent 按需路由,实现细粒度的模型选择。
 // coreSystemPrompt 是主 agent 与子 agent **共用**的稳定头部:身份 + 行为规则 + workspace + skill 目录。
@@ -609,7 +609,7 @@ func StartStream(
 	workspace string,
 	skillCatalog string, // 见下方 system prompt 注入逻辑;空串表示当前没有 skill
 	summary string, // 会话压缩摘要,垫在 system prompt 末尾;空串表示尚未压缩
-	forceRole string, // 用户锁定的模型角色("flash"/"pro");空串或 "auto" 表示走关键词路由
+	forceRole string, // 用户锁定的模型角色("flash"/"pro");空串或 "auto" 表示走语义路由
 	workingMode WorkingMode, // 工作模式:每轮把对应 skill 引导追加到最后一条 user 消息(renderWorkingMode)
 ) (tea.Cmd, <-chan tea.Msg) {
 	ch := make(chan tea.Msg, 128)
@@ -644,9 +644,9 @@ func StartStream(
 		}
 
 		// 起手模型选择:
-		//   - forceRole=flash/pro:用户用 /model 锁定,直接定死,绕过关键词路由;
-		//   - 否则(""/auto):入口关键词路由(纯本地、零延迟、无 LLM)——命中复杂关键词 /
-		//     消息 > 500 字 → pro,否则 flash。
+		//   - forceRole=flash/pro:用户用 /model 锁定,直接定死,绕过自动路由;
+		//   - 否则(""/auto):入口语义路由(纯本地、零延迟、无 LLM)——与样板句语义相近 /
+		//     消息 > 500 字 → pro,否则 flash。语义模型没就绪时不判,起手 flash。
 		// 无论哪种,本轮锁定该模型,主循环不再自动切换。
 		switch forceRole {
 		case tools.RoleFlash:
@@ -659,7 +659,7 @@ func StartStream(
 			}
 		default:
 			if latestUserTask != "" && models.Pro.Model != "" {
-				if RouteByKeyword(latestUserTask) == "pro" {
+				if RouteEntry(latestUserTask) == "pro" {
 					role, currentEntry = tools.RolePro, models.Pro
 				}
 			}
