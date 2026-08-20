@@ -4468,6 +4468,15 @@ func (m *model) refreshViewport() {
 	if m.selecting && w > 0 {
 		content = applySelectionHighlight(content, m.selAnchor, m.selEnd, w)
 	}
+	// 裸 \r 必须在**进 viewport 之前**清掉,不能等渲染完再洗。
+	//
+	// viewport 按行切分与 softWrap 都会把裸 \r 当作行内字符:一条 "A\rB" 会被当成
+	// 一个逻辑行,TotalLineCount 因此偏小,YOffset / 视口取行全部错位 ——
+	// 表现就是历史里"吃掉上一条对话",以及整帧行数对不上、聊天内容叠进输入区(issue #232)。
+	//
+	// padLinesToWidth 里早有一道同样的归一化(见 dashboard.go),但它作用在
+	// m.chatViewport.View() 的**输出**上:那时候行已经选错了,把字符洗干净也换不回正确的行。
+	content = normalizeNewlines(content)
 	m.chatViewport.SetContent(content)
 	if atBottom {
 		m.chatViewport.GotoBottom()

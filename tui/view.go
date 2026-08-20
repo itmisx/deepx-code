@@ -418,6 +418,15 @@ func (m model) View() tea.View {
 // normalizeFrame 把整帧锁到精确 width × height:行数不足补空行/过多截尾,
 // 每行宽度不足补空格/过宽用 ansi.Cut 切到精确 width。
 func normalizeFrame(s string, width, height int) string {
+	// 最后一道:右栏状态区、banner 等也可能携带来自 LLM / 工具输出的裸 \r
+	// (主题串、模型名等)。聊天区在 refreshViewport 已经清过,这里兜住其余来源。
+	//
+	// **删除而不是换成 \n**:此刻 s 是已经排好版的整帧,把 \r 变成换行会凭空多出行,
+	// 紧接着的 lines[:height] 就把底部截掉,整个版式往下错 —— 那比原来的毛病更重。
+	if strings.ContainsRune(s, '\r') {
+		s = strings.ReplaceAll(s, "\r\n", "\n")
+		s = strings.ReplaceAll(s, "\r", "")
+	}
 	lines := strings.Split(s, "\n")
 	if len(lines) > height {
 		lines = lines[:height]
