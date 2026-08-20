@@ -53,7 +53,7 @@ func RunExec(cfg agent.ModelConfig, prompt string) error {
 	// exec 的"启动"点:读一次 AGENTS.md 冻结进缓存,让偏好对一次性执行也生效。
 	agent.RefreshPreferences(wd)
 
-	// 固定 auto 模式;forceRole 传 "auto" → 走本地关键词路由(零 token 决定起手模型)。
+	// 固定 auto 模式;forceRole 传 "auto" → 走本地语义路由(零 token 决定起手模型)。
 	// summary 空(一次性,无压缩)。
 	_, ch := agent.StartStream(ctx, cfg, history, agent.AgentMode_Auto, wd, skillCatalog, "", "auto", agent.WorkingModeDefault)
 

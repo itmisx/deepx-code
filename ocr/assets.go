@@ -249,3 +249,29 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	p.callback(p.name, p.current, p.total)
 	return n, err
 }
+
+// === 供其它模块复用的导出入口 ===
+//
+// ORT 动态库的下载/解压/命名在各平台都不一样(见 ort_*.go),而且版本要跟 purego 绑定的
+// 那份对齐。语义路由(agent/router)也要跑 ONNX,与其复制一份、以后两处各自漂移,
+// 不如把这里已经调通的东西导出去共用 —— 库只下一次,放同一个 cacheDir。
+
+// ORTLibName 返回当前平台的 ONNX Runtime 动态库文件名。
+func ORTLibName() string { return ortLibName }
+
+// EnsureORT 只确保 ORT 动态库就位(不碰 OCR 的模型/字典),供只需要跑推理、
+// 不需要 OCR 的调用方使用。已存在则直接返回。
+func EnsureORT(cacheDir string, onProgress ProgressFunc) error {
+	if fileExists(filepath.Join(cacheDir, ortLibName)) {
+		return nil
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return err
+	}
+	return downloadAndExtractORT(cacheDir, onProgress)
+}
+
+// DownloadTo 把 url 下到 destPath(带镜像回退与进度回调),供其它模块下载自己的模型资产。
+func DownloadTo(url, destPath, displayName string, onProgress ProgressFunc) error {
+	return downloadFile(mirrorCandidates(url), destPath, displayName, onProgress)
+}

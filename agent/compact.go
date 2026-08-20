@@ -67,7 +67,7 @@ func WriteContentLimitBytes(ctxWin int) int {
 }
 
 // WriteContentLimitFor 按一份模型配置算出该注入的 Write 上限,取 flash / pro 中**较小**的窗口。
-// 上限是安全阀,得按最脆弱的那个模型定:同一会话里 flash 和 pro 会来回切(关键词路由 +
+// 上限是安全阀,得按最脆弱的那个模型定:同一会话里 flash 和 pro 会来回切(入口路由 +
 // SwitchModel 升级),而写入发生在哪一轮事先不知道。两个窗口可以配得不一样(model.yaml 里
 // 每个条目各有 context_window),按大的算会让跑在小窗口模型上的那轮顶爆。
 // 都没配(都是 0)时回落保守默认。

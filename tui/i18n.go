@@ -326,6 +326,30 @@ var translations = map[string]map[Lang]string{
 		LangZH: "当前对话",
 		LangEN: "current",
 	},
+	"cmd.routerlistpro.desc": {
+		LangZH: "查看「升级 pro」的语义样板句",
+		LangEN: "List the sentence patterns that route to pro",
+	},
+	"cmd.routerlistflash.desc": {
+		LangZH: "查看「维持 flash」的语义样板句",
+		LangEN: "List the sentence patterns that keep flash",
+	},
+	"cmd.routeraddpro.desc": {
+		LangZH: "添加一条「升级 pro」的样板句",
+		LangEN: "Add a sentence pattern that routes to pro",
+	},
+	"cmd.routeraddflash.desc": {
+		LangZH: "添加一条「维持 flash」的样板句",
+		LangEN: "Add a sentence pattern that keeps flash",
+	},
+	"cmd.routerdeletepro.desc": {
+		LangZH: "删除一条「升级 pro」的样板句",
+		LangEN: "Remove a sentence pattern that routes to pro",
+	},
+	"cmd.routerdeleteflash.desc": {
+		LangZH: "删除一条「维持 flash」的样板句",
+		LangEN: "Remove a sentence pattern that keeps flash",
+	},
 	"cmd.help.desc": {
 		LangZH: "帮助",
 		LangEN: "Help",
@@ -438,7 +462,7 @@ var translations = map[string]map[Lang]string{
 		LangEN: "Locked to the %s model (no auto-routing or auto-upgrade this session).",
 	},
 	"model.unlocked": {
-		LangZH: "已切换为自动选择模型（按任务关键词路由 flash/pro）。",
+		LangZH: "已切换为自动选择模型（按任务语义路由 flash/pro）。",
 		LangEN: "Switched to automatic model selection (routed flash/pro by task).",
 	},
 	"model.pin.global": {
