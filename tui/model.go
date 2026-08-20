@@ -788,9 +788,20 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 				}
 				gobHistory = gobHistory[1:]
 			}
+			// 落盘的历史可能带着"内容为空"的消息(进程被杀 / 写一半 / 旧版本 bug)。
+			// 不修的话这个会话每轮都会被服务端以 `content` is not set 打回,除了删会话没别的出路。
+			var rep agent.HistoryRepair
+			gobHistory, rep = agent.RepairHistory(gobHistory)
 			m.history = gobHistory
 			m.topic = lastTopicOf(gobHistory) // 冷启动恢复右栏主题(不额外存盘,从历史里读回)
 			rebuildChatFromHistory(m.chatContent, gobHistory)
+			if rep.Any() {
+				// 说一声:这是对用户数据的就地改动,静默做掉不合适。
+				// 必须排在 rebuildChatFromHistory 之后 —— 插在前面会显示在整段历史上方,
+				// 看起来像"这事发生在对话开始之前"。
+				m.appendChat("System", fmt.Sprintf("检测到历史记录有损坏并已修复(补全 %d 条、丢弃 %d 条)—— 否则本会话会一直报 `content` is not set",
+					rep.Filled, rep.Dropped))
+			}
 			// 老对话(升级前就有 history、没 conv.json)首次进 /sessions 别显示"(未命名)":
 			// 用第一条用户消息回填标题。session 包自己解码不了 history.gob,放这儿做。
 			if sess.ConvTitle() == "" {

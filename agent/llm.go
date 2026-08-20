@@ -260,6 +260,15 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 		w.Content = m.ContentParts
 	case m.Content != "":
 		w.Content = m.Content
+	case m.Role == "user" || m.Role == "system":
+		// **user / system 永远带 content**,哪怕是空串。
+		//
+		// 省掉这个字段服务端会直接 400:`Param Incorrect: "content" is not set`。
+		// 而空 user 消息是真会出现的:比如只贴图不打字的消息,在图片读不出来 /
+		// 当轮模型不支持视觉被剥成纯文本之后,内容就空了(见 image_render.go)。
+		// 那些产出点各自兜底,但兜底总有漏网的,这里是最后一道 —— 一条"内容为空的消息"
+		// 顶多让模型少看一句话,而一个 400 会让整轮对话直接失败。
+		w.Content = ""
 	case m.Role == "assistant" && len(m.ToolCalls) == 0:
 		// DeepSeek (和部分严格的 OpenAI 兼容实现) 要求 assistant 消息至少含 content 或 tool_calls。
 		// 当模型只输出 reasoning_content 时,两者都缺会导致下轮请求被 API 400 拒绝。

@@ -109,9 +109,16 @@ func (m *model) loadCurrentConversation() {
 				}
 				gobHistory = gobHistory[1:]
 			}
+			// 同启动路径:切过去的会话也可能带着空内容消息,不修就会一直 400。
+			var rep agent.HistoryRepair
+			gobHistory, rep = agent.RepairHistory(gobHistory)
 			m.history = gobHistory
 			m.topic = lastTopicOf(gobHistory) // 右栏主题跟着切过去的会话恢复
 			rebuildChatFromHistory(m.chatContent, gobHistory)
+			if rep.Any() { // 排在重建之后,否则提示会顶到整段历史上方
+				m.appendChat("System", fmt.Sprintf("检测到历史记录有损坏并已修复(补全 %d 条、丢弃 %d 条)",
+					rep.Filled, rep.Dropped))
+			}
 		}
 	}
 	m.refreshViewport()

@@ -44,6 +44,9 @@ func clampToolOutput(name, out string) string {
 		name, len(out), len(b))
 }
 
+// emptyToolOutput 是工具返回空字符串时写进历史的占位文本。见 clampTurnToolOutput。
+const emptyToolOutput = "(无输出)"
+
 // clampTurnToolOutput 在 clampToolOutput(单条上限)之上再加一道「本轮合计上限」。
 // spent 指向本轮已计入历史的工具结果字节数,每个 assistant turn 开始时由调用方置 0。
 // 预算够:截到剩余预算内(UTF-8 边界)并累加 spent;预算用尽:整条替换为简短占位,
@@ -58,6 +61,15 @@ func clampTurnToolOutput(name, out string, spent *int) string {
 	}
 	if len(out) <= remaining {
 		*spent += len(out)
+		// 空结果必须换成占位文本:空的 tool 消息序列化出去没有 content 字段,
+		// 服务端直接 `Param Incorrect: "content" is not set`(HTTP 400),整轮对话失败。
+		//
+		// 现有工具都各自兜了底(Glob 返回"无匹配"、Bash 返回"(无输出)"…),但那是二十多个
+		// 返回点各自记得的约定,没有任何东西在保障它。这里是所有工具结果汇进历史的**唯一**入口,
+		// 收在这一处,新加的工具就不必再记着这件事。
+		if out == "" {
+			return emptyToolOutput
+		}
 		return out
 	}
 	b := []byte(out)[:remaining]

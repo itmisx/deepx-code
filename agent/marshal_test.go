@@ -49,15 +49,23 @@ func TestMarshalAssistantWithToolCallsOmitsContentOK(t *testing.T) {
 	}
 }
 
-// TestMarshalUserMessageStillOmits:
-// 非 assistant 角色 + 空 content,应该按原逻辑 omitempty 省略 content。
-func TestMarshalUserMessageStillOmits(t *testing.T) {
-	m := ChatMessage{Role: "system", Content: ""}
+// TestMarshalToolMessageStillOmits:
+// tool 角色 + 空 content 仍按 omitempty 省略 —— 空的工具结果是正常的,
+// 这条形状线上验证过,不动。
+//
+// 这个测试原先断言的是 **system** 也省略("非 assistant 角色一律 omitempty")。
+// 那只是当初加 assistant 兜底时写的"别误伤其它角色"守卫,并非某个服务端的要求;
+// 而它恰恰锁死了一个真 bug:空的 user / system 消息发出去没有 content 字段,
+// 服务端直接 `Param Incorrect: "content" is not set`,整轮对话失败。
+// 现在 user / system 一律带 content(见 ChatMessage.MarshalJSON 与
+// TestMarshal_UserSystemAlwaysHaveContent),这里改测 tool。
+func TestMarshalToolMessageStillOmits(t *testing.T) {
+	m := ChatMessage{Role: "tool", Content: "", ToolCallID: "call_1"}
 	b, err := json.Marshal(m)
 	if err != nil {
 		t.Fatalf("marshal err: %v", err)
 	}
 	if strings.Contains(string(b), `"content"`) {
-		t.Errorf("system with empty content should still be omitted, got: %s", string(b))
+		t.Errorf("tool with empty content should still be omitted, got: %s", string(b))
 	}
 }

@@ -72,9 +72,16 @@ func stripImageParts(m ChatMessage) ChatMessage {
 			b.WriteString(p.Text)
 		}
 	}
+	// 只有图片、没有一句文字的消息(贴图不打字),剥完就成了空内容 ——
+	// 空的 user 消息序列化出来没有 content 字段,服务端直接 400。
+	// 用与 renderImageOCR 相同的提示兜底,顺带让模型知道这里本来有图。
+	text := b.String()
+	if strings.TrimSpace(text) == "" {
+		text = nonVisionReminder
+	}
 	return ChatMessage{
 		Role:             m.Role,
-		Content:          b.String(),
+		Content:          text,
 		ReasoningContent: m.ReasoningContent,
 		ToolCalls:        m.ToolCalls,
 		ToolCallID:       m.ToolCallID,
@@ -130,7 +137,12 @@ func renderImageVision(m ChatMessage) ChatMessage {
 		}
 	}
 	if !hasImg {
-		return ChatMessage{Role: m.Role, Content: m.Content}
+		// 同上:贴图不打字 + 图全读不出来 → Content 为空 → 空 user 消息 → 400。
+		text := m.Content
+		if strings.TrimSpace(text) == "" {
+			text = nonVisionReminder
+		}
+		return ChatMessage{Role: m.Role, Content: text}
 	}
 
 	// 提醒压在最后
