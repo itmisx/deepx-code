@@ -637,7 +637,7 @@ func StartStream(
 		}
 		if workspace != "" {
 			// 在首轮注入 system 提示:当前工作目录 + 任务拆解 + plan 节点的 model 选择指南。
-			// 入口模型已经由 keyword router 决定(flash 或 pro);模型自行判断要不要 CreatePlan 拆任务。
+			// 入口模型已经由 RouteEntry 决定(flash 或 pro);模型自行判断要不要 CreatePlan 拆任务。
 			if len(convo) == 0 || convo[0].Role != "system" {
 				sysBase := BuildSystemPrompt(workspace, skillCatalog, summary)
 				convo = append([]ChatMessage{{Role: "system", Content: sysBase}}, convo...)

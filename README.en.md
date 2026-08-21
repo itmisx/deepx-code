@@ -22,7 +22,7 @@
 ## ✨ Highlights
 
 - **🦫 Single Go binary** — no Node / Python runtime, one-line `curl` install, macOS / Linux / Windows.
-- **💰 Cache-friendly, cheap long sessions** — engineered around DeepSeek's prefix cache (~99% hit measured); local keyword routing starts every turn with zero latency and zero tokens.
+- **💰 Cache-friendly, cheap long sessions** — engineered around DeepSeek's prefix cache (~99% hit measured); local semantic routing starts every turn with zero latency and zero tokens.
 - **🧭 Built-in code graph (codegraph)** — symbol-level go-to-def / callers / interface impls / blast-radius, precise on Go via `go/types`. Replaces whole-repo grep.
 - **👀 Local image OCR (PaddleOCR)** — read text from a screenshot offline, no multimodal API needed.
 - **📎 `@` file / directory reference** — type `@` in the input to open a local fuzzy path picker; selecting inserts `@path` into the message, then the model fetches it on demand via Read (file) / List (directory). Precise context — no need to stuff everything in.
@@ -119,21 +119,6 @@ Piping data in is also supported (`cat error.log | deepx exec "analyze this erro
 ## 🧠 How It Works
 
 <details>
-<summary><b>Model routing (local, zero latency, zero tokens)</b></summary>
-
-When your message arrives, deepx does local keyword matching + a length check and picks the starting model instantly, with no extra LLM tokens:
-
-```
-contains "refactor / architecture / debug …"  → straight to pro
-length < 100 chars                             → flash
-length > 500 chars                             → pro
-```
-
-Covers Chinese (Simplified / Traditional) / English / Japanese / Korean. Mid-turn, the model can also `SwitchModel` up to pro for hard reasoning.
-
-</details>
-
-<details>
 <summary><b>Session persistence (gob binary, lossless resume)</b></summary>
 
 ```
@@ -180,6 +165,49 @@ CreatePlan
 <summary><b>Local OCR (fills the image-reading gap)</b></summary>
 
 Paste an image or give a path → the LLM reads its text via the `OCR` tool (PaddleOCR PP-OCRv5). The first call downloads the OCR model (~37MB) and the ONNX runtime; after that it's **offline and responds in seconds**. Lets the agent "see" an error screenshot or UI mockup without a multimodal API.
+
+</details>
+
+### 🚦 Model routing (local semantics, zero latency, zero tokens)
+
+When your message arrives, deepx decides **locally** whether this turn starts on flash or pro — no extra LLM tokens. There are only two rules:
+
+```
+message > 500 chars                                  → pro (no model needed, works offline)
+top similarity to the "escalate to pro" set ≥ 0.91
+        AND higher than to the "stay on flash" set   → pro
+otherwise                                            → flash (fallback)
+```
+
+It compares **whole-sentence meaning**, not keyword containment — "tweak the style of this one line" is not escalated just because it says "optimize", and "where is the design mockup folder" is not caught by "design". On first run it downloads a quantized multilingual-e5-small in the background (118 MB; sources tried in order: ModelScope → hf-mirror → HuggingFace) and **never blocks startup**. Until it is ready — or if the download fails — no entry routing happens at all and every turn starts on flash.
+
+> `/model flash|pro` pins the model and bypasses routing; only `auto` (the default) runs the rules above. The starting model is locked for the turn; the model may `SwitchModel` up to pro mid-turn but never back down (switching models invalidates the whole prompt cache).
+
+<details>
+<summary><b>Tuning the router: two pattern sets, six commands</b></summary>
+
+The two sets are peers; each fixes errors in one direction:
+
+| Set                  | Built-in | Meaning                     | When to add to it                                        |
+| :------------------- | -------: | :-------------------------- | :------------------------------------------------------- |
+| **escalate to pro**  |       36 | like these → start on pro   | **missed**: should have been pro but started on flash     |
+| **stay on flash**    |       22 | like these → pull back      | **false positive**: a concept question or a one-liner got escalated |
+
+> The "stay on flash" set **pulls back messages that already cleared the threshold** but are really concept questions or small edits. It is not "match this set to stay on flash" — anything matching neither set is flash anyway.
+
+| Command                                                       | Purpose                                          |
+| :------------------------------------------------------------ | :----------------------------------------------- |
+| `/router-list-pro` `/router-list-flash`                        | show a set's current patterns (numbered) and the live rules |
+| `/router-add-pro <sentence>`                                   | for missed escalations                           |
+| `/router-add-flash <sentence>`                                 | for false escalations                            |
+| `/router-delete-pro <n>` `/router-delete-flash <n>`            | delete by the number shown in the list (each set numbers from 1) |
+
+Two rules for writing patterns:
+
+1. **Write a complete task statement, not keywords.** ✅ `map out the canary release process for this service`; ❌ `canary release process` — a bag of words embeds far away from real user messages and matches almost nothing.
+2. **The more specific, the safer.** An overly generic pattern drags neighbouring trivia along with it (measured: one too-broad pattern rescued 2 cases and broke 2 others).
+
+You can also edit `~/.deepx/router.yaml` directly (`patterns` = escalate to pro, `flash_patterns` = stay on flash); it takes effect on **the very next message, no restart**. The file is generated on first run with both built-in sets. If you never edited a set, that set is auto-synced when deepx ships an updated built-in table; **a set you edited is never overwritten**. Emptying a set — or deleting the file — restores the built-in defaults.
 
 </details>
 
@@ -236,6 +264,7 @@ A built-in symbol-graph engine lets the model do symbol-level navigation + call-
 | `/model`                             | popup to pick the model (auto routes by task / flash / pro lock); `/model flash` also works directly |
 | `/provider`                          | quick-switch between configured providers: popup to pick (or `/provider <name>` directly). Each `/config` archives its config by provider name to `~/.deepx/provider.yaml`; switching writes that provider's flash/pro back into `model.yaml` |
 | `/reasoning`                         | popup to set `thinking` / `reasoning_effort` per role (flash/pro); empty = don't send the field (safe for MiMo and other models that don't support it) |
+| `/router-list-pro` `/router-list-flash` `/router-add-pro` `/router-add-flash` `/router-delete-pro` `/router-delete-flash` | tune the router's two pattern sets (see "🚦 Model routing"): `list` shows a set numbered plus the live rules, `add <sentence>` adds, `delete <n>` removes. Missed escalations go in the `-pro` set, false escalations (concept questions / one-liners) in the `-flash` set; you can also edit `~/.deepx/router.yaml` directly — effective on the next message |
 | `/compact`                           | manually compact the session        |
 | `/new` `/sessions`                   | start a new conversation / browse history (↑↓ select, Enter switch) |
 | `/status`                            | show/hide the right status panel (or press `Ctrl+B`) |
@@ -315,7 +344,7 @@ deepx/
 
 ## 💰 Token Economy
 
-- **Zero-token routing**: pure local keywords, no LLM call
+- **Zero-token routing**: pure local sentence embeddings, no LLM call
 - **No tool pre-injection**: `Memory` / `LoadSkill` enter context only when called
 - **Minimal system prompt**: only cross-tool rules + workspace; trigger conditions live in each tool's description
 - **DeepSeek KV-cache friendly**: the tools array doesn't change with mode / role; the system prompt is version-aware on gob restore

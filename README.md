@@ -22,7 +22,7 @@
 ## ✨ 核心特性
 
 - **🦫 单一 Go 二进制** —— 无 Node / Python 运行时，`curl` 一行装，macOS / Linux / Windows 全覆盖。
-- **💰 缓存友好，长会话省钱** —— 围绕 DeepSeek 前缀缓存设计，实测 ~99% 命中；本地关键词路由零延迟、零 token 起手。
+- **💰 缓存友好，长会话省钱** —— 围绕 DeepSeek 前缀缓存设计，实测 ~99% 命中；本地语义路由零延迟、零 token 起手。
 - **🧭 内置代码图谱（codegraph）** —— 符号级跳定义 / 找调用 / 接口实现 / 影响面分析，Go 经 `go/types` 精确解析，替代满仓库 grep。
 - **👀 本地图片 OCR（PaddleOCR）** —— 离线读图，丢一张截图就能识别其中文字，不依赖多模态 API。
 - **📎 `@` 文件 / 目录引用** —— 输入框打 `@` 弹本地模糊路径选择器，选中即把 `@路径` 塞进消息；模型按需调 Read（文件）/ List（目录），精准给上下文不用全塞。
@@ -119,21 +119,6 @@ deepx exec "把 README 的功能列表翻译成英文,写到 README.en.md"
 ## 🧠 核心机制
 
 <details>
-<summary><b>模型路由（本地，零延迟，零 token）</b></summary>
-
-用户消息发来时，deepx 在本地做关键词匹配 + 长度判定，瞬间决定起手模型，不额外消耗任何 LLM token：
-
-```
-消息含 "重构 / refactor / architecture / 调试 …" → 直接升 pro
-消息长度 < 100 字符                              → flash
-消息长度 > 500 字符                              → pro
-```
-
-覆盖中（简 / 繁）/ 英 / 日 / 韩五种语言。本轮中如遇复杂推理，模型还可主动 `SwitchModel` 升到 pro。
-
-</details>
-
-<details>
 <summary><b>会话持久化（gob 二进制，无损续接）</b></summary>
 
 ```
@@ -186,6 +171,49 @@ CreatePlan
 <summary><b>本地 OCR（补齐读图能力）</b></summary>
 
 粘贴图片或给出图片路径 → LLM 通过 `OCR` 工具（PaddleOCR PP-OCRv5）识别其中文字。首次自动下载 OCR 模型（~37MB）与 ONNX runtime，之后**离线、秒级**响应。让你不依赖多模态 API 也能让 agent「看懂」报错截图 / UI 稿。
+
+</details>
+
+### 🚦 模型路由（本地语义，零延迟，零 token）
+
+消息发来时，deepx 在**本地**决定这一轮起手用 flash 还是 pro，不额外消耗任何 LLM token。判据只有两条：
+
+```
+消息 > 500 字                                     → pro（不依赖模型，离线也生效）
+与「升级 pro」组样板句的最高相似度 ≥ 0.91
+        且高于与「维持 flash」组的                 → pro
+否则                                              → flash（兜底）
+```
+
+比的是**整句语义**而不是关键词包含 —— 「优化一下这行代码的写法」不会因为出现「优化」二字被抬成 pro，「设计稿在哪个目录」也不会因为「设计」中招。首次启动后台下载 multilingual-e5-small 量化模型（118 MB；源按 ModelScope → hf-mirror → HuggingFace 依次尝试，国内可直连），**不阻塞启动**；没就绪或下载失败时不做自动路由，起手一律 flash。
+
+> `/model` 锁定 flash / pro 时绕过路由，`auto`（默认）才走上面的判定。起手模型本轮锁定，模型可用 `SwitchModel` 中途升到 pro，但不再降回来（切模型会让上下文缓存整段失效）。
+
+<details>
+<summary><b>调教路由：两组样板句 + 六个命令</b></summary>
+
+两组样板句对等，各修一个方向的错：
+
+| 组                | 内置 | 含义                       | 什么时候往里加                       |
+| :---------------- | ---: | :------------------------- | :----------------------------------- |
+| **升级 pro**      |   36 | 像这些 → 起手用 pro        | **漏判**：该走 pro 却起手 flash 了   |
+| **维持 flash**    |   22 | 像这些 → 拉回 flash        | **误判**：问概念 / 小修小补被抬成 pro |
+
+> 「维持 flash」组是**把已过门槛、但其实是问概念或小修小补的消息拉回来**，不是「命中它才留在 flash」—— 匹配不上任何一组的消息本来就是 flash。
+
+| 命令                                           | 作用                                   |
+| :--------------------------------------------- | :------------------------------------- |
+| `/router-list-pro` `/router-list-flash`         | 看某组当前样板句（带序号）与生效规则   |
+| `/router-add-pro <整句>`                        | 漏判时用                               |
+| `/router-add-flash <整句>`                      | 误判时用                               |
+| `/router-delete-pro <序号>` `/router-delete-flash <序号>` | 按列表序号删（两组各自从 1 排）        |
+
+写样板句的两条原则：
+
+1. **写完整的任务陈述，不写关键词。** ✅ `把这个服务的灰度发布流程梳理清楚`；❌ `灰度 发布 流程` —— 词串的句向量和真实用户消息差得远，基本匹配不上任何东西。
+2. **越具体越安全。** 太通用的句子会把邻近的琐事一起吸过来（实测：一句过于笼统的样板句捞回 2 条的同时误伤了 2 条）。
+
+也可以直接编辑 `~/.deepx/router.yaml`（`patterns` = 升级 pro，`flash_patterns` = 维持 flash），**下一条消息即生效，不用重启**。该文件首次启动时自动生成、内含两组内置默认；某一组你没改过的话，deepx 升级时那组会自动同步到新版内置表，**改过的组永不覆盖**。清空某组或删掉整个文件 = 恢复内置默认。
 
 </details>
 
@@ -242,6 +270,7 @@ CreatePlan
 | `/model`                             | 弹窗选择模型（auto 按任务路由 / flash / pro 定死）；也可 `/model flash` 直接指定                                                                                                                                                                                                                             |
 | `/provider`                          | 在已配置的供应商间快捷切换：弹窗选（也可 `/provider <名字>` 直切）。每次 `/config` 会把配置按供应商名存档到 `~/.deepx/provider.yaml`，切换即把对应 flash/pro 写回 `model.yaml`                                                                                                                                |
 | `/reasoning`                         | 弹窗设置 `thinking` / `reasoning_effort`（flash/pro 各自独立；空值=不发该字段，对 MiMo 等不支持的模型零侵入）                                                                                                                                                                                                |
+| `/router-list-pro` `/router-list-flash` `/router-add-pro` `/router-add-flash` `/router-delete-pro` `/router-delete-flash` | 调教模型路由的两组样板句（见「🚦 模型路由」）：`list` 带序号查看某组并显示生效规则，`add <整句>` 添加，`delete <序号>` 删除。漏判（该 pro 却起手 flash）加进 `-pro` 组，误判（问概念 / 小修小补被抬成 pro）加进 `-flash` 组；也可直接编辑 `~/.deepx/router.yaml`，下一条消息即生效 |
 | `/compact`                           | 手动压缩会话以节省上下文                                                                                                                                                                                                                                                                                     |
 | `/new` `/sessions`                   | 开启全新对话 / 历史对话列表（↑↓ 选，Enter 切换）                                                                                                                                                                                                                                                             |
 | `/status`                            | 显示/隐藏右侧状态栏（也可按 `Ctrl+B`）                                                                                                                                                                                                                                                                       |
@@ -321,7 +350,7 @@ deepx/
 
 ## 💰 Token 经济
 
-- **路由零 token**：纯本地关键词，不发 LLM 调用
+- **路由零 token**：纯本地句向量比对，不发 LLM 调用
 - **工具不预注入**：`Memory` / `LoadSkill` 只在调用时才进 context
 - **system prompt 极简**：仅跨工具规约 + workspace，工具触发条件在各自 description 里
 - **DeepSeek KV cache 友好**：tools 数组不随模式 / 角色变化；system prompt gob 恢复时版本感知
