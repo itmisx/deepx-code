@@ -40,9 +40,9 @@ const probeMarkerToken = "MELON"
 // max_tokens 压到很小 —— 缓存未命中时偶尔探一次,token 成本压到最低(避免走 StartStream 白搭整套前缀)。
 //
 // 返回 (vision, err) 的语义,决定调用方要不要缓存:
-//   - err != nil:网络 / 5xx 等**瞬时**错误 → 调用方不要缓存,下次启动再探;
+//   - err != nil:网络 / 429 / 401 / 5xx 等**瞬时**错误 → 调用方不要缓存,下次启动再探;
 //   - err == nil:**确定性**结果 —— true=认出暗号(支持视觉);
-//     false=要么端点 4xx 拒绝图片输入,要么回了但没认出暗号(静默忽略)→ 视为不支持。
+//     false=要么端点以 400/404/415 等 4xx 拒绝图片输入,要么回了但没认出暗号(静默忽略)→ 视为不支持。
 func ProbeVision(ctx context.Context, entry ModelEntry) (bool, error) {
 	if entry.Model == "" || entry.BaseURL == "" {
 		return false, fmt.Errorf("probe: 模型或 base_url 为空")
@@ -107,11 +107,30 @@ func ProbeVision(ctx context.Context, entry ModelEntry) (bool, error) {
 		// 归一化后再比:去掉大小写和所有非字母数字,这样模型把暗号拼成 "M-E-L-O-N" / "M E L O N"
 		// 也能命中。认出暗号 = 真看到了图,确定性结果,可缓存。
 		return strings.Contains(normalizeAlnum(reply), probeMarkerToken), nil
+	case isTransientProbeStatus(resp.StatusCode):
+		// 限流 / 鉴权 / 余额 / 超时 / 5xx:跟"支不支持图片"无关的瞬时错误,不缓存,下次启动重探。
+		// 尤其是 429 —— 共享池(如 OpenRouter)对探测请求限流时,若按 4xx 缓存成 false,
+		// 会把真有视觉能力的模型永久降级到 OCR(issue #241)。
+		return false, fmt.Errorf("probe HTTP %d: %s", resp.StatusCode, string(body))
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
-		// 4xx 多半是"该模型不支持图片输入" → 确定性 false,可缓存。
+		// 其余 4xx(400/404/415/422…)才是"该模型不支持图片输入" → 确定性 false,可缓存。
 		return false, nil
 	default:
-		// 5xx 等:瞬时错误,不缓存。
+		// 其它非 200(3xx 等):当瞬时错误处理,不缓存。
 		return false, fmt.Errorf("probe HTTP %d: %s", resp.StatusCode, string(body))
 	}
+}
+
+// isTransientProbeStatus 判断该状态码是否属于"与视觉能力无关的瞬时错误"——这类结果不能缓存,
+// 否则一次限流/掉线就把模型的视觉能力钉死成 false。
+func isTransientProbeStatus(code int) bool {
+	switch code {
+	case http.StatusUnauthorized, // 401 key 无效
+		http.StatusPaymentRequired, // 402 余额不足
+		http.StatusForbidden,       // 403 无权限
+		http.StatusRequestTimeout,  // 408 请求超时
+		http.StatusTooManyRequests: // 429 限流
+		return true
+	}
+	return code >= 500
 }
