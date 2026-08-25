@@ -18,12 +18,45 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 const providerFileName = "provider.yaml"
+
+// providerNameRe 限定自定义供应商名的字符集:小写字母/数字开头,其后可跟小写字母/数字/. _ -,总长 1..32。
+// 这个名字既是 provider.yaml 的 YAML key,也是 `/provider <名字>` 的参数,所以不收空格、不收大小写歧义。
+var providerNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+
+// NormalizeProviderName 规范化用户输入的供应商名:去首尾空白 + 转小写。
+// 空输入回退到 ProviderCustom —— 不起名字就还是占 "custom" 那个槽,保持老行为。
+func NormalizeProviderName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return ProviderCustom
+	}
+	return s
+}
+
+// ValidProviderName 报告规范化后的名字是否符合字符集要求。
+func ValidProviderName(name string) bool { return providerNameRe.MatchString(name) }
+
+// IsPresetProvider 报告 name 是否为预设供应商 id(deepseek / mimo / kimi / qwen)。
+// ProviderCustom 不算 —— 它是"没起名字的自定义"的默认落点,允许被自定义配置占用。
+//
+// 预设名对自定义配置是保留字:那些槽由「选预设供应商 + 填 api_key」的流程维护(base_url/model 都套
+// modelConfig 默认),自定义配置占了名字会让 /provider 列表里的同名项名不副实。
+func IsPresetProvider(name string) bool {
+	for _, p := range ProviderOptions {
+		if p == name {
+			return p != ProviderCustom
+		}
+	}
+	return false
+}
 
 // Providers 是 provider.yaml 的反序列化目标:供应商名 → 该供应商的 {flash, pro} 配置。
 type Providers map[string]Config
@@ -90,6 +123,20 @@ func saveProviders(ps Providers) error {
 	return os.WriteFile(p, data, 0600)
 }
 
+// DeleteProvider 从 provider.yaml 删掉一个供应商存档。名字不存在视为成功(幂等)。
+// 只动存档 —— model.yaml 里当前生效的配置不受影响。
+func DeleteProvider(name string) error {
+	ps, err := LoadProviders()
+	if err != nil {
+		return err
+	}
+	if _, ok := ps[name]; !ok {
+		return nil
+	}
+	delete(ps, name)
+	return saveProviders(ps)
+}
+
 // LoadProvider 取单个供应商的存档配置;不存在返回 (nil, false, nil)。
 func LoadProvider(name string) (*Config, bool, error) {
 	ps, err := LoadProviders()
@@ -103,8 +150,14 @@ func LoadProvider(name string) (*Config, bool, error) {
 	return &c, true, nil
 }
 
-// ProviderNames 返回 provider.yaml 中已存的供应商名:预设供应商(ProviderOptions)按其顺序
-// 排在前,其余未知名按字母序排在后,便于 /provider 选择器稳定展示。文件为空时返回空切片。
+// ProviderNames 返回 provider.yaml 中已存的供应商名,顺序供 /provider 选择器稳定展示:
+//
+//  1. 预设供应商(deepseek / mimo / kimi / qwen)按 ProviderOptions 的顺序排在最前;
+//  2. 用户起了名字的自定义供应商按字母序跟在后面;
+//  3. ProviderCustom("custom")固定垫底 —— 它是"没起名字"的杂物槽,内容随时被下一次匿名
+//     自定义覆盖,排在有名有姓的配置前面只会碍眼。
+//
+// 文件为空时返回空切片。
 func ProviderNames() ([]string, error) {
 	ps, err := LoadProviders()
 	if err != nil {
@@ -113,6 +166,9 @@ func ProviderNames() ([]string, error) {
 	names := make([]string, 0, len(ps))
 	seen := make(map[string]bool, len(ps))
 	for _, p := range ProviderOptions {
+		if p == ProviderCustom {
+			continue // 留到最后
+		}
 		if _, ok := ps[p]; ok {
 			names = append(names, p)
 			seen[p] = true
@@ -120,10 +176,14 @@ func ProviderNames() ([]string, error) {
 	}
 	rest := make([]string, 0)
 	for k := range ps {
-		if !seen[k] {
+		if !seen[k] && k != ProviderCustom {
 			rest = append(rest, k)
 		}
 	}
 	sort.Strings(rest)
-	return append(names, rest...), nil
+	names = append(names, rest...)
+	if _, ok := ps[ProviderCustom]; ok {
+		names = append(names, ProviderCustom)
+	}
+	return names, nil
 }

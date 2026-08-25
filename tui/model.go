@@ -4,7 +4,6 @@ import (
 	"context"
 	"deepx/agent"
 	"deepx/agent/router"
-	"deepx/config"
 	"deepx/mcp"
 	"deepx/session"
 	"deepx/skill"
@@ -137,17 +136,23 @@ type model struct {
 	//   - setupRequired   = true 表示无有效 yaml(首次启动);不允许 Esc 关闭,Ctrl+C 才退出
 	//   - setupInput      = api key 输入框
 	//   - setupErr        = 错误回显(保存失败 / 输入为空等)
-	//   - setupProviderIdx= 当前选中的模型供应商下标(config.ProviderOptions),←/→ 切换
+	//   - setupDeleteConfirm = 第一步待确认删除的供应商名(按 d 记下,再按一次 d 才真删;空=无待确认)
+	//   - setupProviders  = 第一步的候选列表:config.ProviderOptions ++ provider.yaml 里已存的自定义名
+	//   - setupSavedStart = setupProviders 中"已保存的自定义"分段的起始下标(之后的项选中即进入编辑)
+	//   - setupProviderIdx= 当前选中项在 setupProviders 中的下标,↑/↓ 切换
 	//   - setupStep       = 0 选供应商 / 1 填配置(两步流程)
-	//   - setupCustomFields= 「其它」自定义的 10 个字段输入框(flash/pro 各 5);setupFieldIdx 为焦点
-	showSetup         bool
-	setupRequired     bool
-	setupInput        textinput.Model
-	setupErr          string
-	setupProviderIdx  int
-	setupStep         int
-	setupCustomFields []textinput.Model
-	setupFieldIdx     int
+	//   - setupCustomFields= 自定义表单的字段输入框(name + flash/pro 各 5);setupFieldIdx 为焦点
+	showSetup          bool
+	setupRequired      bool
+	setupInput         textinput.Model
+	setupErr           string
+	setupProviders     []string
+	setupSavedStart    int
+	setupDeleteConfirm string
+	setupProviderIdx   int
+	setupStep          int
+	setupCustomFields  []textinput.Model
+	setupFieldIdx      int
 
 	// activeModelRole 是上一轮 / 当前流的实际生效角色 ("flash" / "pro")。
 	// 每条新用户消息默认从 flash 起手;agent.ModelSwitchMsg 到达时更新为 pro。
@@ -870,6 +875,9 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 			}
 		}
 	}
+
+	// 第一步的候选列表(预设 + provider.yaml 里已存的自定义名),首次启动和 /config 都靠它。
+	m.refreshSetupProviders()
 
 	// 首次启动:强制弹 modal,焦点在 setup 输入框
 	if needsSetup {
@@ -1653,7 +1661,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		// 配置 modal 期间:custom 表单转发给焦点字段,预设供应商转发给 setupInput(允许粘贴 key)
 		if m.showSetup {
-			if m.setupStep == 1 && m.curProvider() == config.ProviderCustom {
+			if m.setupStep == 1 && m.setupIsCustomForm() {
 				if m.setupFieldIdx >= 0 && m.setupFieldIdx < len(m.setupCustomFields) {
 					var c tea.Cmd
 					m.setupCustomFields[m.setupFieldIdx], c = m.setupCustomFields[m.setupFieldIdx].Update(msg)
@@ -1708,6 +1716,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				return m, tea.Quit
 			case "esc":
+				// 有待确认的删除时,Esc 先撤销它(而不是直接关掉整个面板)。
+				if m.setupStep == 0 && m.setupDeleteConfirm != "" {
+					m.setupDeleteConfirm = ""
+					return m, nil
+				}
 				// 第二步 Esc → 退回选供应商;第一步 Esc → 关闭(首次启动不许关)。
 				if m.setupStep == 1 {
 					m.setupStep = 0
@@ -1732,29 +1745,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// 第一步:选供应商(↑/↓ 竖排切换,←/→ 同效;Enter 进入填配置)。
 			if m.setupStep == 0 {
+				// 删除是"按两次 d 确认";期间按下任何别的键都当放弃,再照常处理那个键。
+				if key := msg.String(); m.setupDeleteConfirm != "" && key != "d" && key != "delete" {
+					m.setupDeleteConfirm = ""
+				}
 				switch msg.String() {
+				case "d", "delete":
+					m.setupDeleteSelected()
+					return m, nil
 				case "up", "left", "k":
-					n := len(config.ProviderOptions)
+					n := len(m.setupProviders)
 					if n > 0 {
 						m.setupProviderIdx = (m.setupProviderIdx - 1 + n) % n
 					}
 					return m, nil
 				case "down", "right", "j":
-					n := len(config.ProviderOptions)
+					n := len(m.setupProviders)
 					if n > 0 {
 						m.setupProviderIdx = (m.setupProviderIdx + 1) % n
 					}
 					return m, nil
 				case "enter":
-					m.setupStep = 1
-					m.setupErr = ""
-					if m.curProvider() == config.ProviderCustom {
-						m.setupCustomFields = newSetupCustomFields()
-						m.setupFieldIdx = 0
-					} else {
-						m.setupInput.SetValue("")
-						m.setupInput.Focus()
-					}
+					m.setupDeleteConfirm = ""
+					m.enterSetupStep2()
 					return m, nil
 				}
 				return m, nil
@@ -1766,8 +1779,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			// 第二步 · custom:10 字段表单(Tab/↑↓ 切字段,Enter 保存)。
-			if m.curProvider() == config.ProviderCustom {
+			// 第二步 · 自定义:多字段表单(Tab/↑↓ 切字段,Enter 保存)。
+			if m.setupIsCustomForm() {
 				switch msg.String() {
 				case "enter":
 					return m, m.submitSetup()

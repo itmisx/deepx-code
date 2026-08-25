@@ -367,7 +367,7 @@ var translations = map[string]map[Lang]string{
 			"- `/review` — 切到审核模式(Write/Update/Bash 需人工确认)\n" +
 			"- `/mode` — 显示当前模式\n" +
 			"- `/config` — 重新配置 API key (覆盖 `~/.deepx/model.yaml`)\n" +
-			"- `/provider` — 在已配置的供应商间快捷切换(`/provider [名字]`;配置存于 `~/.deepx/provider.yaml`)\n" +
+			"- `/provider` — 在已配置的供应商间快捷切换(`/provider [名字]`;配置存于 `~/.deepx/provider.yaml`。自定义供应商可在 /config 里起名,多份配置各占一槽)\n" +
 			"- `/skills` — 列出可用 skill\n" +
 			"- `/skill-add` `/skill-delete` — 搜索安装 / 删除 skill\n" +
 			"- `/mcp-list` `/mcp-add` `/mcp-delete` — 管理 MCP server\n" +
@@ -404,7 +404,7 @@ var translations = map[string]map[Lang]string{
 			"- `/review` — Switch to review mode (Write/Update/Bash require confirmation)\n" +
 			"- `/mode` — Show current mode\n" +
 			"- `/config` — Reconfigure API key (overwrites `~/.deepx/model.yaml`)\n" +
-			"- `/provider` — Quick-switch between configured providers (`/provider [name]`; saved in `~/.deepx/provider.yaml`)\n" +
+			"- `/provider` — Quick-switch between configured providers (`/provider [name]`; saved in `~/.deepx/provider.yaml`. Name your custom providers in /config so each gets its own slot)\n" +
 			"- `/skills` — List available skills\n" +
 			"- `/skill-add` `/skill-delete` — Search-install / delete skills\n" +
 			"- `/mcp-list` `/mcp-add` `/mcp-delete` — Manage MCP servers\n" +
@@ -580,6 +580,8 @@ var translations = map[string]map[Lang]string{
 			"To change base_url / model id only, edit ~/.deepx/model.yaml directly and restart.",
 	},
 	"setup.provider_label":  {LangZH: "选择模型提供商 (↑/↓ 切换):", LangEN: "Choose model provider (↑/↓ to switch):"},
+	"setup.saved_section":   {LangZH: "── 已保存的自定义(选中即可修改)──", LangEN: "── Saved custom (select to edit) ──"},
+	"setup.editing_hint":    {LangZH: "(修改已保存的配置)", LangEN: "(editing saved config)"},
 	"setup.input_label":     {LangZH: "API key:", LangEN: "API key:"},
 	"setup.provider.custom": {LangZH: "其它(自定义)", LangEN: "Other (custom)"},
 	"setup.cur_provider":    {LangZH: "提供商:", LangEN: "Provider:"},
@@ -588,9 +590,45 @@ var translations = map[string]map[Lang]string{
 		LangZH: "Flash 模型需填全 base_url / model / api_key",
 		LangEN: "Flash model needs base_url / model / api_key",
 	},
+	"setup.error.custom_name": {
+		LangZH: "供应商名只能用小写字母 / 数字 / . _ -,以字母或数字开头,最长 32 位",
+		LangEN: "Provider name: lowercase letters / digits / . _ - only, must start with a letter or digit, max 32 chars",
+	},
+	"setup.error.custom_name_reserved": {
+		LangZH: "「%s」是预设供应商名,请换一个(留空则存为 custom)",
+		LangEN: "\"%s\" is a preset provider name — pick another (leave blank to save as custom)",
+	},
+	"setup.renamed_from": {
+		LangZH: "↩ 供应商「%s」已改名为「%s」(旧名字已从 provider.yaml 移除)",
+		LangEN: "↩ Provider \"%s\" renamed to \"%s\" (old name removed from provider.yaml)",
+	},
+	"setup.archived_as": {
+		LangZH: "✓ 已存为供应商「%s」,之后可用 `/provider %s` 切回来",
+		LangEN: "✓ Archived as provider \"%s\" — switch back later with `/provider %s`",
+	},
 	"setup.footer.step_provider": {
 		LangZH: "↑/↓ 选择 · Enter 下一步 · Esc 取消 · Ctrl+C 退出",
 		LangEN: "↑/↓ select · Enter next · Esc cancel · Ctrl+C quit",
+	},
+	"setup.footer.delete_hint": {
+		LangZH: " · d 删除",
+		LangEN: " · d delete",
+	},
+	"setup.delete_confirm": {
+		LangZH: "⚠ 再按一次 d 删除供应商「%s」· 其它键取消",
+		LangEN: "⚠ Press d again to delete provider \"%s\" · any other key cancels",
+	},
+	"setup.error.delete_not_saved": {
+		LangZH: "只能删除「已保存的自定义」里的供应商",
+		LangEN: "Only providers under \"Saved custom\" can be deleted",
+	},
+	"setup.error.delete": {
+		LangZH: "删除失败: %v",
+		LangEN: "Delete failed: %v",
+	},
+	"setup.deleted": {
+		LangZH: "✓ 已删除供应商「%s」(仅移除 provider.yaml 里的存档,当前生效的 model.yaml 不变)",
+		LangEN: "✓ Deleted provider \"%s\" (removes the provider.yaml archive only; the active model.yaml is untouched)",
 	},
 	"setup.footer.step_preset": {
 		LangZH: "Enter 保存 · Esc 返回上一步 · Ctrl+C 退出",
