@@ -44,9 +44,6 @@ const (
 	compactHeadroomFloor = 30_000  // headroom 绝对下限:极小窗口也留够单轮暴涨缓冲
 	compactHeadroomCap   = 180_000 // headroom 绝对上限:大窗口不必按比例留那么多,省得过早压
 
-	// topicHintPct:上下文用量占窗口这个比例以上,主题一旦切换就提醒用户 /new(见 TopicHintTokens)。
-	// 半个窗口已经在讲别的事,旧上下文对新问题就只是噪音了。
-	topicHintPct = 50
 
 	// compactRetryCooldown:轮内压缩**瞬时失败**(超时/网络)后,隔这么多圈工具往返再重试。
 	// 只作用于瞬时失败(轮数不足走永久关,不冷却),故取 4 即可:够稀释反复发压缩请求 / 反复等
@@ -576,29 +573,11 @@ func coreSystemPrompt(workspace, skillCatalog string) string {
 	return base
 }
 
-// topicTrackingPrompt 让主 agent 每轮自报会话主题。**只给主 agent**,不进 coreSystemPrompt ——
-// 那段是主/子 agent 逐字节共用的缓存前缀,写进去子 agent 也会吐标签,而子 agent 的输出是当
-// 工具结果回灌的,标签会混进结果文本里。放在这儿:共用头部不变,主 agent 自己的前缀也仍是
-// 固定文本,缓存两边都不受影响。
-//
-// 只让模型「如实标注」,不让它「据此改变行为」:实测让它自己发现主题变了就改口提醒用户 /new,
-// 换了三种措辞一次都没触发过(它总是优先去帮用户干活);而无条件多吐一个属性稳定生效。
-// 要不要提醒由 tui 侧判(还要叠上模型不知道的上下文用量,见 TopicHintTokens)。
-const topicTrackingPrompt = `
-
-# 会话主题跟踪(格式硬性要求)
-每轮回复的最后一行,固定输出一个主题标签,不要解释它,也不要因为它改变你的正常回答:
-<topic shift="no">一句话概括当前会话在做的事</topic>
-- 本轮和上一轮 <topic> 是同一件事(含它的子问题、追问、返工、换个角度问)→ shift="no",主题沿用或微调措辞。
-- 用户明确转去做另一件不相干的事 → shift="yes",<topic> 写新主题。
-- 会话第一轮 → shift="no"。
-你只负责如实标注,要不要提醒用户新开会话由 DeepX 决定,你自己不要提。`
-
 // BuildSystemPrompt 主 agent 的 system prompt = 共用核心 + 会话摘要尾部。
 // 摘要垫在最后:核心 + skill 那段会话内字节不变,即使摘要每次压缩都变,前缀仍命中,
 // 失效点只从摘要开始(详见前缀缓存优化设计)。
 func BuildSystemPrompt(workspace, skillCatalog, summary string) string {
-	base := coreSystemPrompt(workspace, skillCatalog) + topicTrackingPrompt
+	base := coreSystemPrompt(workspace, skillCatalog)
 	// 持久偏好/项目约定:读会话内冻结的快照(currentPrefs),只在启动 / 压缩时由 RefreshPreferences 刷新,
 	// 中途每轮复用同一份 → 前缀稳定、缓存命中。会话中途写入的 AGENTS.md 下次压缩/重启才生效。
 	if prefs := currentPrefs(); prefs != "" {
@@ -1308,21 +1287,6 @@ func CompactTriggerTokens(ctxWin int) int {
 	headroom = min(headroom, compactHeadroomCap)   // 上限:大窗口不必按比例留那么多
 	headroom = min(headroom, ctxWin*60/100)        // 别把 headroom 撑到吃掉大半窗口
 	return ctxWin - headroom
-}
-
-// TopicHintTokens 返回「上下文用量达到多少 token,主题一旦切换就值得提醒用户 /new」的阈值。
-//
-// 提醒的价值全在「赶在压缩之前」:换会话是零成本的,而压缩是花钱去有损保留一个已经不相关的
-// 话题 —— 真换了话题的会话,那笔压缩钱花得最冤。所以取窗口的 topicHintPct%,再钳到压缩阈值
-// 的 80% 以下:大窗口下 50% 本来就远早于 ~70% 的压缩线,小窗口压缩来得早(64K 时 34K 就压),
-// 靠这个钳位保证任何窗口下提醒都排在压缩前面。
-//
-// 低于这条线不提醒:上下文还小的时候换不换会话都无所谓,提醒纯属噪音。
-func TopicHintTokens(ctxWin int) int {
-	if ctxWin <= 0 {
-		return 0
-	}
-	return min(ctxWin*topicHintPct/100, CompactTriggerTokens(ctxWin)*80/100)
 }
 
 // isRetryableStatus 判断 HTTP 状态码是否值得重试:429 限流、5xx 服务端错误、408/409/425 等瞬时类。

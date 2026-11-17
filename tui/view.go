@@ -923,14 +923,6 @@ func (m model) rightPanelView() string {
 	rows = append(rows, section(T("panel.curmodel"), []string{
 		truncate(curModel, rightPanelWidth-4),
 	})...)
-	// 会话主题:模型每轮结尾自报(见 topic.go),按轮更新。摆在上下文用量上面 —— 这两项是
-	// 一起看的:主题告诉你"这段对话在讲什么",用量告诉你"它占了多少",主题变了而用量又高
-	// 就该 /new 了。还没识别到时用暗色占位,保持右栏行数稳定、不跳动。
-	topicVal := subtle(T("panel.topic.none"))
-	if m.topic != "" {
-		topicVal = truncWidth(m.topic, rightPanelWidth-4)
-	}
-	rows = append(rows, section("🏷 "+T("panel.topic"), []string{topicVal})...)
 	// 用量紧跟模型。首轮 API 调用结束才能拿到 lastUsage,没拿到前用 "—" 占位,保持布局一致。
 	// 上下文占用:本轮发出的 prompt tokens / 压缩基准窗口。未配置(=0)则只显示已用 token,
 	// 不编造分母/百分比。

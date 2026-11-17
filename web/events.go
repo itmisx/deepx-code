@@ -81,8 +81,7 @@ type Usage struct {
 // ToWebEvent 把一个 agent tea.Msg 映射成 web Event。
 // 第二个返回值 false 表示该消息与 web 无关(不广播)。
 // user_message / review_request / review_resolved 由 tui 侧直接构造 Event,不经过这里。
-// TokenMsg 也不在这里映射:助手正文要先剥掉会话主题标签才能给浏览器,而过滤器状态在 tui 侧,
-// 所以 token 事件由 tui 的 TokenMsg 分支拿过滤后的文本显式广播。
+// TokenMsg 也不在这里映射:助手正文由 tui 的 TokenMsg 分支显式广播(和写入对话区同一处)。
 func ToWebEvent(msg tea.Msg) (Event, bool) {
 	switch m := msg.(type) {
 	case agent.ReasoningTokenMsg:

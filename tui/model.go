@@ -179,11 +179,6 @@ type model struct {
 	workingMode agent.WorkingMode // 工作模式 kp/openspec/sp(默认 kp);每轮注入对应 skill 引导;按 session 保存/恢复
 	history     []agent.ChatMessage
 
-	// 会话主题:模型每轮结尾输出 <topic shift="yes|no">…</topic>(见 topic.go)。会话级状态,
-	// 跟着 /new、/sessions 走。topicF 逐 chunk 把标签从显示里剥掉并捕获主题。
-	topic  string
-	topicF topicFilter
-
 	streamCh <-chan tea.Msg
 
 	status    string
@@ -808,7 +803,6 @@ func initialModel(models agent.ModelConfig, needsSetup bool, version string, hub
 			var rep agent.HistoryRepair
 			gobHistory, rep = agent.RepairHistory(gobHistory)
 			m.history = gobHistory
-			m.topic = lastTopicOf(gobHistory) // 冷启动恢复右栏主题(不额外存盘,从历史里读回)
 			rebuildChatFromHistory(m.chatContent, gobHistory)
 			if rep.Any() {
 				// 说一声:这是对用户数据的就地改动,静默做掉不合适。
@@ -1240,7 +1234,6 @@ func (m model) submitUserInput(input string) (model, tea.Cmd) {
 	m.streaming = true
 	m.thinking = true
 	m.currentReply.Reset()
-	m.topicF = topicFilter{} // 上一轮若被 ESC 打断,过滤器可能停在标签中间
 
 	// 仪表盘:开计时,快照本轮输入字符数,输出归零
 	m.turnStartedAt = time.Now()
@@ -2721,19 +2714,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeTool = ""
 		m.retryNotice = "" // 流式开始 = 重试成功,清掉提示
 		text := string(msg)
-		m.currentReply.WriteString(text) // 落盘/入历史的是原文,只有显示层剥主题标签
-		// 主题标签是给 DeepX 看的元信息,不显示给用户。标签可能被切在 chunk 中间,
-		// 故过滤器是有状态的(见 topic.go),这里逐段喂。
-		visible := m.topicF.feed(text)
-		// 整段都被标签吃掉时什么都不做 —— 开了段就会给"只输出了一行标签"的轮次留个空气泡,
-		// 广播出去也只是条空事件。
-		if visible != "" {
+		m.currentReply.WriteString(text)
+		if text != "" {
 			// 上一段若是 tools(刚执行完工具,模型继续说话),切回 assistant 段。
 			m.chatContent.EnsureKind(kindAssistant, "")
-			m.chatContent.Append(visible)
-			// token 事件不走 Update 顶部的通用广播(那里拿不到过滤后的文本),在这里显式发,
-			// 免得标签漏到浏览器面板上。
-			m.broadcast(web.Event{Kind: "token", Text: visible})
+			m.chatContent.Append(text)
+			// token 事件不走 Update 顶部的通用广播(ToWebEvent 不映射 TokenMsg),在这里显式发。
+			m.broadcast(web.Event{Kind: "token", Text: text})
 		}
 		m.tokens += len([]rune(text))
 		m.turnOutputChars += len([]rune(text))
@@ -2746,11 +2733,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "tool"
 		m.retryNotice = "" // 工具开始 = 上游请求已成功,清掉重试提示
-		// 助手这段话说完了:把主题过滤器攒着的未决尾巴(可能是 "<topic" 的部分前缀)吐回当前段,
-		// 否则它会跟到下面的工具行后面去。
-		if tail := m.topicF.flush(); tail != "" {
-			m.chatContent.Append(tail)
-		}
 		// Todo 是可见清单的「全量快照更新」,不是一次干活动作:清单本身由下方 live overlay
 		// 实时勾选,每次更新再往 chat 打一行 "📌 Todo" 是纯噪音。所以 Todo 不留 chat 行、
 		// 也不计入"N 次工具调用"。其余工具照旧:紧凑单行 <icon> Name (主参数)。
@@ -3110,14 +3092,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.session.Append("assistant", final)
 			}
 		}
-		// 本轮收尾:先把主题过滤器的未决尾巴吐回对话区,再落地这一轮的主题 / 判是否提醒 /new。
-		// 尾巴只剩空白就丢掉 —— 话都说完了,补几个换行只会在气泡末尾留空行。
-		if tail := strings.TrimRight(m.topicF.flush(), " \t\r\n"); tail != "" {
-			m.chatContent.Append(tail)
-		}
-		ctxWin := m.compactCtxWin()
-		m.applyTurnTopic(ctxWin)
-
 		m.status = "idle"
 		m.streaming = false
 		m.thinking = false
@@ -3134,7 +3108,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 这里无需额外动作 — 旧的 trimDisplayTurns 按"10 轮"裁的逻辑已被 chatLog 取代。
 
 		// 检查是否需要触发会话压缩:上下文用量达到 agent.CompactTriggerTokens(动态阈值)就压。
-		// ctxWin 在上面判主题提醒时已经算好。
+		// ctxWin 同时供下面的影子热压判档。
+		ctxWin := m.compactCtxWin()
 		if m.session != nil && m.models.Pro.Model != "" && !m.compacting && m.lastPromptTokens() >= agent.CompactTriggerTokens(ctxWin) {
 			m.compacting = true
 			m.compactingFG = true // 前台阻塞:同手动 /compact,footer 转 spinner + 期间挡输入。子 agent 走 runSubAgent 不经此处,天然例外。
@@ -3555,7 +3530,7 @@ func (m *model) appendChat(role, text string) {
 func chatDisplayText(msg agent.ChatMessage) string {
 	if msg.Content != "" {
 		if msg.Role == "assistant" {
-			return stripTopicTags(msg.Content) // 历史存的是原文,重放到对话区时才剥主题标签
+			return stripLegacyTopicTags(msg.Content) // 老会话历史里还留着已废弃的 <topic> 标签
 		}
 		return msg.Content
 	}
@@ -4400,7 +4375,6 @@ func (m *model) startWorkflowTurn(rawInput, name string, args any) tea.Cmd {
 	m.streaming = true
 	m.thinking = true
 	m.currentReply.Reset()
-	m.topicF = topicFilter{}
 	m.turnStartedAt = time.Now()
 	m.turnInputChars = sumHistoryChars(m.history)
 	m.turnOutputChars = 0

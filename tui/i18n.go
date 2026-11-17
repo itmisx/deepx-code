@@ -265,11 +265,6 @@ var translations = map[string]map[Lang]string{
 		LangZH: "未知沙箱模式:%s(可选 off / native / docker)",
 		LangEN: "Unknown sandbox mode: %s (choose off / native / docker)",
 	},
-	// %d = 当前上下文占窗口的百分比。只有过了 TopicHintTokens 这条线才会发,所以这个数一定不小。
-	"topic.shift": {
-		LangZH: "会话主题已切换,建议 /new 开一段新对话 —— 旧话题的上下文对新问题只是噪音,还占着 %d%% 的窗口。",
-		LangEN: "Topic changed — consider /new for a fresh conversation. The old context is just noise for this question, and it's holding %d%% of the window.",
-	},
 	"session.new": {
 		LangZH: "已开启全新对话。上一段对话已保存,/sessions 可找回。",
 		LangEN: "Started a new conversation. The previous one is saved — see /sessions.",
@@ -518,7 +513,6 @@ var translations = map[string]map[Lang]string{
 	"panel.codegraph": {LangZH: "代码图谱", LangEN: "CodeGraph"},
 	"panel.sandbox":   {LangZH: "沙箱", LangEN: "Sandbox"},
 	"panel.workmode":  {LangZH: "工作模式", LangEN: "Working mode"},
-	"panel.topic":     {LangZH: "会话主题", LangEN: "Topic"},
 	"panel.todo":      {LangZH: "待办", LangEN: "Todo"}, // Todo 工具:主 agent 顺序清单
 	"panel.plan":      {LangZH: "计划", LangEN: "Plan"}, // CreatePlan:并发子 agent DAG
 
@@ -530,7 +524,6 @@ var translations = map[string]map[Lang]string{
 	"panel.label.wmode":    {LangZH: "方法", LangEN: "Method"},
 	"panel.label.endpoint": {LangZH: "接口", LangEN: "Endpoint"},
 	"panel.label.balance":  {LangZH: "余额", LangEN: "Balance"},
-	"panel.topic.none":     {LangZH: "(尚未识别)", LangEN: "(not identified yet)"},
 
 	// === Status values ===
 	"status.idle":      {LangZH: "idle", LangEN: "idle"},
