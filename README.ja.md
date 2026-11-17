@@ -100,7 +100,7 @@ deepx                       # 対話型 TUI に入る
 
 | 項目          | 方法                                                         |
 | :------------ | :----------------------------------------------------------- |
-| プロバイダ & Key | 初回起動時のウィザードで：**←/→ でプロバイダ（DeepSeek / Xiaomi MiMo）を選び、対応する API Key を入力**し `~/.deepx/model.yaml` に保存。各プロバイダに flash/pro の既定モデルと 1M コンテキストを用意（DeepSeek `deepseek-v4-flash` / `-pro`、MiMo `mimo-v2.5` / `-pro`）。`/config` で再設定。 |
+| プロバイダ & Key | 初回起動時のウィザードで：**←/→ でプロバイダ（DeepSeek / Xiaomi MiMo / Kimi / Qwen）を選び、対応する API Key を入力**し `~/.deepx/model.yaml` に保存。各プロバイダに flash/pro の既定モデルと 1M コンテキストを用意（DeepSeek `deepseek-flash` / `deepseek-v4-pro`、MiMo `mimo-v2.6-flash` / `-pro`、Kimi `kimi-k3` / `kimi-k3.1-pro`、Qwen `qwen3.8-flash` / `qwen4-max`）。`/config` で再設定。 |
 | 手動上書き    | `~/.deepx/model.yaml` を直接編集し、role（flash/pro）ごとに `base_url` / `model` / `api_key` / `max_tokens` / `context_window` を上書き可能。flash と pro で別プロバイダも指定できる。 |
 | 複数プロバイダ切替 | `/config` のたびに設定がプロバイダ名(deepseek/mimo/kimi/qwen/custom)で `~/.deepx/provider.yaml` に保存される。`/provider` で設定済みプロバイダ間をワンタップ切替(そのプロバイダの flash/pro を `model.yaml` に書き戻す)、Key の再入力不要。 |
 | Skill         | `<ワークスペース>/.deepx/skills/` に配置、または `~/.claude/skills/` などを再利用。 |

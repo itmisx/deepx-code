@@ -74,6 +74,9 @@ func loadOrEmptyConfig() (*config.Config, bool, error) {
 	if !config.Exists() {
 		return &config.Config{}, true, nil
 	}
+	// 老配置里厂商已下线的 model id 就地换成现役 id(静默、无过期 id 则不写文件,见 config.Migrate)。
+	// 放在 Load 之前:Load 自己也会在内存里迁移,这一步只是把结果固化到 model.yaml / provider.yaml。
+	config.Migrate()
 	c, err := config.Load()
 	if err != nil {
 		return nil, false, err

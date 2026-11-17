@@ -100,7 +100,7 @@ deepx               # enter the interactive TUI
 
 | Item         | How                                                          |
 | :----------- | :----------------------------------------------------------- |
-| Provider & key | A wizard prompts on first run: **use ←/→ to pick a provider (DeepSeek / Xiaomi MiMo), then enter its API key**, persisted to `~/.deepx/model.yaml`. Each provider ships default flash/pro models and 1M context (DeepSeek `deepseek-v4-flash` / `-pro`, MiMo `mimo-v2.5` / `-pro`). Reconfigure with `/config`. |
+| Provider & key | A wizard prompts on first run: **use ←/→ to pick a provider (DeepSeek / Xiaomi MiMo / Kimi / Qwen), then enter its API key**, persisted to `~/.deepx/model.yaml`. Each provider ships default flash/pro models and 1M context (DeepSeek `deepseek-flash` / `deepseek-v4-pro`, MiMo `mimo-v2.6-flash` / `-pro`, Kimi `kimi-k3` / `kimi-k3.1-pro`, Qwen `qwen3.8-flash` / `qwen4-max`). Reconfigure with `/config`. |
 | Manual override | Edit `~/.deepx/model.yaml` directly to override `base_url` / `model` / `api_key` / `max_tokens` / `context_window` per role (flash/pro); flash and pro may even point at different providers. |
 | Multi-provider switch | Each `/config` archives the config by provider name (deepseek/mimo/kimi/qwen/custom) to `~/.deepx/provider.yaml`. Use `/provider` to one-tap switch between configured providers (writes that provider's flash/pro back into `model.yaml`) without re-entering keys. |
 | Skills       | Drop into `<workspace>/.deepx/skills/`, or reuse `~/.claude/skills/` etc. |

@@ -4,7 +4,7 @@
 //
 //	flash:
 //	  base_url: https://api.deepseek.com
-//	  model: deepseek-v4-flash
+//	  model: deepseek-flash
 //	  api_key: sk-...
 //	pro:
 //	  base_url: https://api.deepseek.com
@@ -52,7 +52,7 @@ const (
 
 	defaultProvider   = "deepseek"
 	defaultBaseURL    = "https://api.deepseek.com"
-	defaultFlashModel = "deepseek-v4-flash"
+	defaultFlashModel = "deepseek-flash"
 	defaultProModel   = "deepseek-v4-pro"
 )
 
@@ -93,23 +93,26 @@ var modelConfig = map[string]modelT{
 	},
 	"mimo": {
 		URL:           "https://api.xiaomimimo.com/v1",
-		FlashModel:    "mimo-v2.5",
-		ProModel:      "mimo-v2.5-pro",
-		MaxTokens:     131072,    // mimo 单次 completion 上限
+		FlashModel:    "mimo-v2.6-flash", // v2.5 系列已于 2026-10-21 下线,旧名直接失效
+		ProModel:      "mimo-v2.6-pro",
+		MaxTokens:     131072,    // mimo 单次 completion 上限(128K)
 		ContextWindow: 1_048_576, // 1M
 	},
 	"kimi": {
 		URL:           "https://api.moonshot.cn/v1", // 必须带 /v1,端点为 /v1/chat/completions
-		FlashModel:    "kimi-k2.5",
-		ProModel:      "kimi-k2.6",
-		MaxTokens:     0, // 0 = 不发 max_tokens,走模型默认输出上限(见 agent.chatRequest omitempty)
-		ContextWindow: 262144, // 256K
+		FlashModel:    "kimi-k3",                    // k2.5 已下线、k2.6 在停服名单里,现役是 k3 系列
+		ProModel:      "kimi-k3.1-pro",
+		MaxTokens:     0,         // 0 = 不发 max_tokens,走模型默认输出上限(见 agent.chatRequest omitempty)
+		ContextWindow: 1_048_576, // 1M
 	},
 	"qwen": {
+		// 共享域名 dashscope.aliyuncs.com 自 2026-09-30 起只保不增(维护模式),官方推荐换成
+		// 工作空间专属域名 https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1。
+		// 预设里填不了 WorkspaceId,所以继续用共享域名;要迁移就在 model.yaml 里改 base_url。
 		URL:           "https://dashscope.aliyuncs.com/compatible-mode/v1", // 阿里云北京;端点 /v1/chat/completions
-		FlashModel:    "qwen3.7-plus",
-		ProModel:      "qwen3.7-max",
-		MaxTokens:     0, // 0 = 不发 max_tokens,走模型默认输出上限
+		FlashModel:    "qwen3.8-flash",                                     // qwen3.7-max 已不在现役列表
+		ProModel:      "qwen4-max",
+		MaxTokens:     0,         // 0 = 不发 max_tokens,走模型默认输出上限(两者均 131072)
 		ContextWindow: 1_048_576, // 1M
 	},
 }
@@ -165,11 +168,14 @@ func Default(apiKey string) *Config {
 }
 
 // defaultContextWindow 根据模型名推断上下文窗口,给旧 yaml(没写 context_window)兜底用。
-// 已知供应商(deepseek / mimo)默认 1M tokens,其它未知模型保守取 64K。
+// 预设供应商的现役模型都是 1M tokens;其它未知模型保守取 64K —— 宁可早压缩,也别把窗口报大了
+// 让请求超长被拒。名字按子串匹配,所以只列能确认 1M 的那几族(kimi 旧的 k2 系列只有 256K)。
 func defaultContextWindow(model string) int {
 	m := strings.ToLower(model)
-	if strings.Contains(m, "deepseek") || strings.Contains(m, "mimo") {
-		return 1_048_576
+	for _, k := range []string{"deepseek", "mimo", "kimi-k3", "qwen3.8", "qwen4"} {
+		if strings.Contains(m, k) {
+			return 1_048_576
+		}
 	}
 	return 65_536
 }
@@ -198,6 +204,9 @@ func Load() (*Config, error) {
 	if err := yaml.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("解析 %s: %w", p, err)
 	}
+	// 已下线的 model id 换成同族现役 id(见 migrate.go)。这里只改内存里的副本 ——
+	// 落盘由 Migrate() 在启动时统一做,免得每个 Load 调用方都去写一次文件。
+	migrateConfig(&c)
 	if c.Flash.ContextWindow <= 0 {
 		c.Flash.ContextWindow = defaultContextWindow(c.Flash.Model)
 	}

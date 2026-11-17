@@ -70,8 +70,24 @@ func ProviderPath() (string, error) {
 	return filepath.Join(home, dirName, providerFileName), nil
 }
 
-// LoadProviders 读 provider.yaml。文件不存在视为空(返回空 map,非错误);解析失败返回 err。
+// LoadProviders 读 provider.yaml,并把已下线的 model id 在内存里换成现役 id(见 migrate.go)。
+// 文件不存在视为空(返回空 map,非错误);解析失败返回 err。
 func LoadProviders() (Providers, error) {
+	ps, err := loadProvidersRaw()
+	if err != nil {
+		return nil, err
+	}
+	for name, c := range ps {
+		if migrateConfig(&c) {
+			ps[name] = c
+		}
+	}
+	return ps, nil
+}
+
+// loadProvidersRaw 读 provider.yaml 原样返回,不做过期 id 迁移 —— 只给 migrateProviderFile 用,
+// 它要靠"迁移前后有没有变"决定是否重写文件。
+func loadProvidersRaw() (Providers, error) {
 	p, err := ProviderPath()
 	if err != nil {
 		return nil, err

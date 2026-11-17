@@ -17,7 +17,7 @@ func TestProviderRoundTrip(t *testing.T) {
 	}
 
 	ds := &Config{
-		Flash: ModelEntry{BaseURL: "https://api.deepseek.com", Model: "deepseek-v4-flash", APIKey: "sk-ds"},
+		Flash: ModelEntry{BaseURL: "https://api.deepseek.com", Model: "deepseek-flash", APIKey: "sk-ds"},
 		Pro:   ModelEntry{BaseURL: "https://api.deepseek.com", Model: "deepseek-v4-pro", APIKey: "sk-ds"},
 	}
 	cu := &Config{

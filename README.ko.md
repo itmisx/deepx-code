@@ -100,7 +100,7 @@ deepx                   # 대화형 TUI 진입
 
 | 항목          | 방법                                                         |
 | :------------ | :----------------------------------------------------------- |
-| 공급자 & Key | 첫 실행 마법사에서 **←/→로 공급자(DeepSeek / Xiaomi MiMo)를 선택하고 해당 API Key를 입력**해 `~/.deepx/model.yaml`에 저장. 각 공급자에 flash/pro 기본 모델과 1M 컨텍스트 제공(DeepSeek `deepseek-v4-flash` / `-pro`, MiMo `mimo-v2.5` / `-pro`). `/config`로 재설정. |
+| 공급자 & Key | 첫 실행 마법사에서 **←/→로 공급자(DeepSeek / Xiaomi MiMo / Kimi / Qwen)를 선택하고 해당 API Key를 입력**해 `~/.deepx/model.yaml`에 저장. 각 공급자에 flash/pro 기본 모델과 1M 컨텍스트 제공(DeepSeek `deepseek-flash` / `deepseek-v4-pro`, MiMo `mimo-v2.6-flash` / `-pro`, Kimi `kimi-k3` / `kimi-k3.1-pro`, Qwen `qwen3.8-flash` / `qwen4-max`). `/config`로 재설정. |
 | 수동 재정의   | `~/.deepx/model.yaml`을 직접 편집해 role(flash/pro)별로 `base_url` / `model` / `api_key` / `max_tokens` / `context_window`를 재정의 가능. flash와 pro가 서로 다른 공급자를 가리킬 수도 있음. |
 | 다중 공급자 전환 | `/config` 할 때마다 설정이 공급자 이름(deepseek/mimo/kimi/qwen/custom)으로 `~/.deepx/provider.yaml`에 보관됨. `/provider`로 설정된 공급자 간 원탭 전환(해당 공급자의 flash/pro를 `model.yaml`에 다시 기록), Key 재입력 불필요. |
 | Skill         | `<워크스페이스>/.deepx/skills/`에 두거나 `~/.claude/skills/` 등 재사용. |
